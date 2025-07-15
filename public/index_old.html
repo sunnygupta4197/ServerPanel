@@ -1,0 +1,1649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ServerPanel Pro</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Icons -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- Charts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    
+    <!-- Socket.io -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --primary-dark: #1d4ed8;
+            --secondary: #6b7280;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --background: #0f172a;
+            --surface: #1e293b;
+            --surface-light: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #cbd5e1;
+            --border: #374151;
+            --sidebar-width: 256px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--background);
+            color: var(--text-primary);
+            overflow-x: hidden;
+        }
+
+        /* Login Screen */
+        .login-container {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, var(--background) 0%, var(--surface) 100%);
+        }
+
+        .login-form {
+            background: var(--surface);
+            padding: 2rem;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+        }
+
+        .login-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .login-header h1 {
+            font-size: 1.875rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .login-header p {
+            color: var(--text-secondary);
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 0.75rem;
+            background: var(--background);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            transition: border-color 0.2s;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 6px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+            width: 100%;
+            justify-content: center;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-dark);
+        }
+
+        .btn-secondary {
+            background: var(--surface-light);
+            color: var(--text-primary);
+        }
+
+        .btn-secondary:hover {
+            background: var(--border);
+        }
+
+        .btn-success {
+            background: var(--success);
+            color: white;
+        }
+
+        .btn-warning {
+            background: var(--warning);
+            color: white;
+        }
+
+        .btn-error {
+            background: var(--error);
+            color: white;
+        }
+
+        /* Main Layout */
+        .app-container {
+            display: flex;
+            height: 100vh;
+        }
+
+        .sidebar {
+            width: var(--sidebar-width);
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            height: 100vh;
+            left: 0;
+            top: 0;
+            transform: translateX(-100%);
+            transition: transform 0.3s ease;
+            z-index: 1000;
+        }
+
+        .sidebar.open {
+            transform: translateX(0);
+        }
+
+        .sidebar-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sidebar-header h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+        }
+
+        .sidebar-nav {
+            flex: 1;
+            padding: 1rem 0;
+            overflow-y: auto;
+        }
+
+        .nav-item {
+            margin: 0.25rem 0;
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1.5rem;
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }
+
+        .nav-link:hover,
+        .nav-link.active {
+            background: var(--surface-light);
+            color: var(--text-primary);
+            border-left-color: var(--primary);
+        }
+
+        .nav-link i {
+            width: 1.25rem;
+            text-align: center;
+        }
+
+        .main-content {
+            flex: 1;
+            margin-left: 0;
+            transition: margin-left 0.3s ease;
+        }
+
+        .main-content.with-sidebar {
+            margin-left: var(--sidebar-width);
+        }
+
+        .topbar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .topbar-left {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .sidebar-toggle {
+            background: none;
+            border: none;
+            color: var(--text-primary);
+            font-size: 1.25rem;
+            cursor: pointer;
+            padding: 0.5rem;
+            border-radius: 6px;
+            transition: background 0.2s;
+        }
+
+        .sidebar-toggle:hover {
+            background: var(--surface-light);
+        }
+
+        .topbar-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .user-menu {
+            position: relative;
+        }
+
+        .user-avatar {
+            width: 2rem;
+            height: 2rem;
+            border-radius: 50%;
+            background: var(--primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .page-content {
+            padding: 1.5rem;
+            max-width: 100%;
+            overflow-x: auto;
+        }
+
+        .page-header {
+            margin-bottom: 2rem;
+        }
+
+        .page-title {
+            font-size: 1.875rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .page-description {
+            color: var(--text-secondary);
+        }
+
+        /* Cards */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: between;
+        }
+
+        .card-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+        }
+
+        .card-body {
+            padding: 1.5rem;
+        }
+
+        /* Grid System */
+        .grid {
+            display: grid;
+            gap: 1.5rem;
+        }
+
+        .grid-cols-1 { grid-template-columns: repeat(1, 1fr); }
+        .grid-cols-2 { grid-template-columns: repeat(2, 1fr); }
+        .grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
+        .grid-cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+        @media (max-width: 768px) {
+            .grid-cols-2,
+            .grid-cols-3,
+            .grid-cols-4 {
+                grid-template-columns: 1fr;
+            }
+            
+            .main-content.with-sidebar {
+                margin-left: 0;
+            }
+        }
+
+        /* Stats Cards */
+        .stat-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--primary);
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+
+        .stat-icon {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            font-size: 1.5rem;
+            color: var(--primary);
+            opacity: 0.5;
+        }
+
+        /* Progress Bars */
+        .progress {
+            width: 100%;
+            height: 8px;
+            background: var(--background);
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 0.5rem 0;
+        }
+
+        .progress-bar {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-bar.success { background: var(--success); }
+        .progress-bar.warning { background: var(--warning); }
+        .progress-bar.error { background: var(--error); }
+
+        /* Tables */
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .table th,
+        .table td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .table th {
+            background: var(--surface-light);
+            font-weight: 600;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .table tbody tr:hover {
+            background: var(--surface-light);
+        }
+
+        /* Alerts */
+        .alert {
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .alert-info {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            color: #93c5fd;
+        }
+
+        .alert-success {
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
+        }
+
+        .alert-warning {
+            background: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+            color: #fcd34d;
+        }
+
+        .alert-error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+        }
+
+        /* Modal */
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .modal.show {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal-content {
+            background: var(--surface);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            width: 90%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+            transform: scale(0.9);
+            transition: transform 0.3s ease;
+        }
+
+        .modal.show .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .modal-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0.25rem;
+        }
+
+        .modal-body {
+            padding: 1.5rem;
+        }
+
+        .modal-footer {
+            padding: 1.5rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 1rem;
+            justify-content: flex-end;
+        }
+
+        /* File Manager */
+        .file-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .file-item {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .file-item:hover {
+            background: var(--surface-light);
+            border-color: var(--primary);
+        }
+
+        .file-icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            color: var(--primary);
+        }
+
+        .file-name {
+            font-size: 0.875rem;
+            word-break: break-word;
+        }
+
+        /* Loading Spinner */
+        .spinner {
+            border: 2px solid var(--border);
+            border-top: 2px solid var(--primary);
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Utilities */
+        .hidden { display: none !important; }
+        .flex { display: flex; }
+        .items-center { align-items: center; }
+        .justify-between { justify-content: space-between; }
+        .gap-2 { gap: 0.5rem; }
+        .gap-4 { gap: 1rem; }
+        .mb-4 { margin-bottom: 1rem; }
+        .mt-4 { margin-top: 1rem; }
+        .text-sm { font-size: 0.875rem; }
+        .text-success { color: var(--success); }
+        .text-warning { color: var(--warning); }
+        .text-error { color: var(--error); }
+    </style>
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="loginScreen" class="login-container">
+        <form id="loginForm" class="login-form">
+            <div class="login-header">
+                <h1>ServerPanel Pro</h1>
+                <p>Sign in to your account</p>
+            </div>
+            
+            <div id="loginAlert" class="alert alert-error hidden">
+                <i class="fas fa-exclamation-triangle"></i>
+                <span id="loginAlertText"></span>
+            </div>
+            
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" class="form-input" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" class="form-input" required>
+            </div>
+            
+            <button type="submit" class="btn btn-primary">
+                <span id="loginText">Sign In</span>
+                <div id="loginSpinner" class="spinner hidden"></div>
+            </button>
+            
+            <div style="margin-top: 1rem; text-align: center; font-size: 0.875rem; color: var(--text-secondary);">
+                Default credentials: admin/admin123!
+            </div>
+        </form>
+    </div>
+
+    <!-- Main Application -->
+    <div id="appContainer" class="app-container hidden">
+        <!-- Sidebar -->
+        <nav id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <h1>ServerPanel Pro</h1>
+            </div>
+            
+            <div class="sidebar-nav">
+                <div class="nav-item">
+                    <a href="#" class="nav-link active" data-page="dashboard">
+                        <i class="fas fa-tachometer-alt"></i>
+                        Dashboard
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-page="system">
+                        <i class="fas fa-server"></i>
+                        System Info
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-page="monitoring">
+                        <i class="fas fa-chart-line"></i>
+                        Monitoring
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-page="files">
+                        <i class="fas fa-folder"></i>
+                        File Manager
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-page="services">
+                        <i class="fas fa-cogs"></i>
+                        Services
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-page="processes">
+                        <i class="fas fa-tasks"></i>
+                        Processes
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-page="users">
+                        <i class="fas fa-users"></i>
+                        Users
+                    </a>
+                </div>
+                <div class="nav-item">
+                    <a href="#" class="nav-link" data-page="settings">
+                        <i class="fas fa-cog"></i>
+                        Settings
+                    </a>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Top Bar -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebarToggle" class="sidebar-toggle">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h2 id="pageTitle">Dashboard</h2>
+                </div>
+                
+                <div class="topbar-right">
+                    <div class="user-menu">
+                        <div class="user-avatar" onclick="logout()">
+                            <span id="userInitials">A</span>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Page Content -->
+            <div class="page-content">
+                <!-- Dashboard Page -->
+                <div id="dashboardPage" class="page">
+                    <div class="page-header">
+                        <h1 class="page-title">Dashboard</h1>
+                        <p class="page-description">System overview and quick stats</p>
+                    </div>
+                    
+                    <div class="grid grid-cols-4 mb-4">
+                        <div class="stat-card">
+                            <div class="stat-value" id="cpuUsage">0%</div>
+                            <div class="stat-label">CPU Usage</div>
+                            <i class="fas fa-microchip stat-icon"></i>
+                            <div class="progress">
+                                <div class="progress-bar" id="cpuProgress" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="stat-card">
+                            <div class="stat-value" id="memoryUsage">0%</div>
+                            <div class="stat-label">Memory Usage</div>
+                            <i class="fas fa-memory stat-icon"></i>
+                            <div class="progress">
+                                <div class="progress-bar" id="memoryProgress" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="stat-card">
+                            <div class="stat-value" id="diskUsage">0%</div>
+                            <div class="stat-label">Disk Usage</div>
+                            <i class="fas fa-hdd stat-icon"></i>
+                            <div class="progress">
+                                <div class="progress-bar" id="diskProgress" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="stat-card">
+                            <div class="stat-value" id="processCount">0</div>
+                            <div class="stat-label">Processes</div>
+                            <i class="fas fa-tasks stat-icon"></i>
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-cols-2">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">CPU Usage</h3>
+                            </div>
+                            <div class="card-body">
+                                <canvas id="cpuChart" width="400" height="200"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">Memory Usage</h3>
+                            </div>
+                            <div class="card-body">
+                                <canvas id="memoryChart" width="400" height="200"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- System Info Page -->
+                <div id="systemPage" class="page hidden">
+                    <div class="page-header">
+                        <h1 class="page-title">System Information</h1>
+                        <p class="page-description">Detailed system specifications</p>
+                    </div>
+                    
+                    <div id="systemInfo" class="grid grid-cols-2">
+                        <!-- System info will be loaded here -->
+                    </div>
+                </div>
+
+                <!-- File Manager Page -->
+                <div id="filesPage" class="page hidden">
+                    <div class="page-header">
+                        <h1 class="page-title">File Manager</h1>
+                        <p class="page-description">Browse and manage server files</p>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="card-header flex justify-between items-center">
+                            <div>
+                                <span>Path: </span>
+                                <span id="currentPath">/</span>
+                            </div>
+                            <div class="flex gap-2">
+                                <button class="btn btn-secondary" onclick="uploadFile()">
+                                    <i class="fas fa-upload"></i>
+                                    Upload
+                                </button>
+                                <button class="btn btn-secondary" onclick="createFolder()">
+                                    <i class="fas fa-folder-plus"></i>
+                                    New Folder
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div id="fileGrid" class="file-grid">
+                                <!-- Files will be loaded here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Services Page -->
+                <div id="servicesPage" class="page hidden">
+                    <div class="page-header">
+                        <h1 class="page-title">Services</h1>
+                        <p class="page-description">Manage system services</p>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="card-body">
+                            <div class="table-container">
+                                <table class="table">
+                                    <thead>
+                                        <tr>
+                                            <th>Service Name</th>
+                                            <th>Status</th>
+                                            <th>Description</th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="servicesTable">
+                                        <!-- Services will be loaded here -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Processes Page -->
+                <div id="processesPage" class="page hidden">
+                    <div class="page-header">
+                        <h1 class="page-title">Processes</h1>
+                        <p class="page-description">View and manage running processes</p>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="card-body">
+                            <div class="table-container">
+                                <table class="table">
+                                    <thead>
+                                        <tr>
+                                            <th>PID</th>
+                                            <th>Name</th>
+                                            <th>CPU %</th>
+                                            <th>Memory %</th>
+                                            <th>User</th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="processesTable">
+                                        <!-- Processes will be loaded here -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Other pages would be added here -->
+            </div>
+        </main>
+    </div>
+
+    <!-- File Upload Modal -->
+    <div id="uploadModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">Upload Files</h3>
+                <button class="modal-close" onclick="closeModal('uploadModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="file" id="fileInput" multiple>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('uploadModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="performUpload()">Upload</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let currentUser = null;
+        let authToken = null;
+        let socket = null;
+        let cpuChart = null;
+        let memoryChart = null;
+        let currentPath = '/';
+
+        // Initialize application
+        document.addEventListener('DOMContentLoaded', function() {
+            checkAuth();
+            setupEventListeners();
+        });
+
+        function setupEventListeners() {
+            // Login form
+            document.getElementById('loginForm').addEventListener('submit', handleLogin);
+            
+            // Sidebar toggle
+            document.getElementById('sidebarToggle').addEventListener('click', toggleSidebar);
+            
+            // Navigation
+            document.querySelectorAll('.nav-link').forEach(link => {
+                link.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    const page = this.dataset.page;
+                    showPage(page);
+                    
+                    // Update active state
+                    document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+                    this.classList.add('active');
+                    
+                    // Update page title
+                    document.getElementById('pageTitle').textContent = this.textContent;
+                });
+            });
+        }
+
+        function checkAuth() {
+            const token = localStorage.getItem('authToken');
+            if (token) {
+                authToken = token;
+                verifyToken();
+            } else {
+                showLogin();
+            }
+        }
+
+        async function verifyToken() {
+            try {
+                const response = await fetch('/api/auth/verify', {
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    authToken = data.token;
+                    currentUser = data.user;
+                    localStorage.setItem('authToken', authToken);
+                    showApp();
+                } else {
+                    showAlert('loginAlert', data.message || 'Login failed', 'error');
+                }
+            } catch (error) {
+                console.error('Login error:', error);
+                showAlert('loginAlert', 'Connection error. Please try again.', 'error');
+            } finally {
+                showLoginSpinner(false);
+            }
+        }
+
+        function showLogin() {
+            document.getElementById('loginScreen').classList.remove('hidden');
+            document.getElementById('appContainer').classList.add('hidden');
+            localStorage.removeItem('authToken');
+            authToken = null;
+            currentUser = null;
+        }
+
+        function showApp() {
+            document.getElementById('loginScreen').classList.add('hidden');
+            document.getElementById('appContainer').classList.remove('hidden');
+            
+            // Set user initials
+            if (currentUser) {
+                const initials = currentUser.username.substring(0, 1).toUpperCase();
+                document.getElementById('userInitials').textContent = initials;
+            }
+            
+            // Initialize real-time monitoring
+            initializeSocket();
+            loadDashboard();
+            
+            // Show sidebar on desktop
+            if (window.innerWidth > 768) {
+                document.getElementById('sidebar').classList.add('open');
+                document.querySelector('.main-content').classList.add('with-sidebar');
+            }
+        }
+
+        function logout() {
+            if (confirm('Are you sure you want to logout?')) {
+                if (socket) {
+                    socket.disconnect();
+                }
+                showLogin();
+            }
+        }
+
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const mainContent = document.querySelector('.main-content');
+            
+            sidebar.classList.toggle('open');
+            mainContent.classList.toggle('with-sidebar');
+        }
+
+        function showPage(pageName) {
+            // Hide all pages
+            document.querySelectorAll('.page').forEach(page => {
+                page.classList.add('hidden');
+            });
+            
+            // Show selected page
+            const targetPage = document.getElementById(pageName + 'Page');
+            if (targetPage) {
+                targetPage.classList.remove('hidden');
+                
+                // Load page-specific data
+                switch(pageName) {
+                    case 'dashboard':
+                        loadDashboard();
+                        break;
+                    case 'system':
+                        loadSystemInfo();
+                        break;
+                    case 'files':
+                        loadFiles(currentPath);
+                        break;
+                    case 'services':
+                        loadServices();
+                        break;
+                    case 'processes':
+                        loadProcesses();
+                        break;
+                }
+            }
+        }
+
+        function initializeSocket() {
+            if (socket) return;
+            
+            socket = io({
+                auth: {
+                    token: authToken
+                }
+            });
+            
+            socket.on('connect', () => {
+                console.log('Connected to server');
+            });
+            
+            socket.on('systemStats', (stats) => {
+                updateDashboardStats(stats);
+            });
+            
+            socket.on('disconnect', () => {
+                console.log('Disconnected from server');
+            });
+        }
+
+        async function loadDashboard() {
+            try {
+                const response = await apiCall('/api/system/stats');
+                if (response.success) {
+                    updateDashboardStats(response.data);
+                }
+                
+                // Initialize charts
+                initializeCharts();
+            } catch (error) {
+                console.error('Failed to load dashboard:', error);
+            }
+        }
+
+        function updateDashboardStats(stats) {
+            // Update stat cards
+            document.getElementById('cpuUsage').textContent = stats.cpu.usage + '%';
+            document.getElementById('memoryUsage').textContent = stats.memory.usage + '%';
+            document.getElementById('diskUsage').textContent = '0%'; // Would need disk stats
+            document.getElementById('processCount').textContent = stats.processes.all;
+            
+            // Update progress bars
+            updateProgressBar('cpuProgress', stats.cpu.usage);
+            updateProgressBar('memoryProgress', stats.memory.usage);
+            
+            // Update charts
+            if (cpuChart) {
+                addDataToChart(cpuChart, new Date().toLocaleTimeString(), stats.cpu.usage);
+            }
+            
+            if (memoryChart) {
+                addDataToChart(memoryChart, new Date().toLocaleTimeString(), stats.memory.usage);
+            }
+        }
+
+        function updateProgressBar(id, value) {
+            const bar = document.getElementById(id);
+            if (bar) {
+                bar.style.width = value + '%';
+                
+                // Update color based on value
+                bar.className = 'progress-bar ';
+                if (value < 70) {
+                    bar.className += 'success';
+                } else if (value < 85) {
+                    bar.className += 'warning';
+                } else {
+                    bar.className += 'error';
+                }
+            }
+        }
+
+        function initializeCharts() {
+            // CPU Chart
+            const cpuCtx = document.getElementById('cpuChart').getContext('2d');
+            cpuChart = new Chart(cpuCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'CPU Usage %',
+                        data: [],
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: '#cbd5e1'
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#cbd5e1' },
+                            grid: { color: '#374151' }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            ticks: { color: '#cbd5e1' },
+                            grid: { color: '#374151' }
+                        }
+                    }
+                }
+            });
+            
+            // Memory Chart
+            const memoryCtx = document.getElementById('memoryChart').getContext('2d');
+            memoryChart = new Chart(memoryCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Memory Usage %',
+                        data: [],
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: '#cbd5e1'
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#cbd5e1' },
+                            grid: { color: '#374151' }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            ticks: { color: '#cbd5e1' },
+                            grid: { color: '#374151' }
+                        }
+                    }
+                }
+            });
+        }
+
+        function addDataToChart(chart, label, data) {
+            chart.data.labels.push(label);
+            chart.data.datasets[0].data.push(data);
+            
+            // Keep only last 20 data points
+            if (chart.data.labels.length > 20) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+            
+            chart.update('none');
+        }
+
+        async function loadSystemInfo() {
+            try {
+                const response = await apiCall('/api/system/info');
+                if (response.success) {
+                    displaySystemInfo(response.data);
+                }
+            } catch (error) {
+                console.error('Failed to load system info:', error);
+            }
+        }
+
+        function displaySystemInfo(info) {
+            const container = document.getElementById('systemInfo');
+            container.innerHTML = `
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">System</h3>
+                    </div>
+                    <div class="card-body">
+                        <div><strong>Platform:</strong> ${info.system.platform}</div>
+                        <div><strong>Hostname:</strong> ${info.system.hostname}</div>
+                        <div><strong>Architecture:</strong> ${info.system.arch}</div>
+                        <div><strong>Release:</strong> ${info.system.release}</div>
+                        <div><strong>Uptime:</strong> ${formatUptime(info.system.uptime)}</div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">CPU</h3>
+                    </div>
+                    <div class="card-body">
+                        <div><strong>Brand:</strong> ${info.cpu.brand}</div>
+                        <div><strong>Cores:</strong> ${info.cpu.cores}</div>
+                        <div><strong>Speed:</strong> ${info.cpu.speed} GHz</div>
+                        <div><strong>Architecture:</strong> ${info.cpu.manufacturer}</div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Memory</h3>
+                    </div>
+                    <div class="card-body">
+                        <div><strong>Total:</strong> ${formatBytes(info.memory.total)}</div>
+                        <div><strong>Used:</strong> ${formatBytes(info.memory.used)}</div>
+                        <div><strong>Free:</strong> ${formatBytes(info.memory.free)}</div>
+                        <div><strong>Usage:</strong> ${info.memory.usage}%</div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Network</h3>
+                    </div>
+                    <div class="card-body">
+                        ${info.network.map(iface => `
+                            <div style="margin-bottom: 1rem;">
+                                <div><strong>${iface.iface}:</strong></div>
+                                <div>IP4: ${iface.ip4 || 'N/A'}</div>
+                                <div>MAC: ${iface.mac || 'N/A'}</div>
+                                <div>State: ${iface.operstate || 'N/A'}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        async function loadFiles(path = '/') {
+            try {
+                const response = await apiCall(`/api/files/browse?path=${encodeURIComponent(path)}`);
+                if (response.success) {
+                    displayFiles(response.data);
+                    currentPath = response.data.currentPath;
+                    document.getElementById('currentPath').textContent = currentPath;
+                }
+            } catch (error) {
+                console.error('Failed to load files:', error);
+            }
+        }
+
+        function displayFiles(data) {
+            const container = document.getElementById('fileGrid');
+            
+            let html = '';
+            
+            // Add parent directory link if not at root
+            if (data.parentPath && data.parentPath !== data.currentPath) {
+                html += `
+                    <div class="file-item" onclick="loadFiles('${data.parentPath}')">
+                        <div class="file-icon">
+                            <i class="fas fa-level-up-alt"></i>
+                        </div>
+                        <div class="file-name">..</div>
+                    </div>
+                `;
+            }
+            
+            // Add files and directories
+            data.items.forEach(item => {
+                const icon = item.type === 'directory' ? 'fa-folder' : 'fa-file';
+                const onclick = item.type === 'directory' 
+                    ? `loadFiles('${item.path}')`
+                    : `openFile('${item.path}')`;
+                    
+                html += `
+                    <div class="file-item" onclick="${onclick}">
+                        <div class="file-icon">
+                            <i class="fas ${icon}"></i>
+                        </div>
+                        <div class="file-name">${item.name}</div>
+                        <div class="text-sm text-secondary">
+                            ${item.type === 'file' ? formatBytes(item.size) : ''}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+
+        async function loadServices() {
+            try {
+                const response = await apiCall('/api/system/services');
+                if (response.success) {
+                    displayServices(response.data);
+                }
+            } catch (error) {
+                console.error('Failed to load services:', error);
+            }
+        }
+
+        function displayServices(services) {
+            const tbody = document.getElementById('servicesTable');
+            
+            tbody.innerHTML = services.map(service => `
+                <tr>
+                    <td>${service.name}</td>
+                    <td>
+                        <span class="text-${service.status === 'active' ? 'success' : 'error'}">
+                            ${service.status}
+                        </span>
+                    </td>
+                    <td>${service.description || 'N/A'}</td>
+                    <td>
+                        <button class="btn btn-secondary btn-sm" onclick="controlService('${service.name}', 'start')">
+                            Start
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="controlService('${service.name}', 'stop')">
+                            Stop
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="controlService('${service.name}', 'restart')">
+                            Restart
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        async function loadProcesses() {
+            try {
+                const response = await apiCall('/api/system/processes');
+                if (response.success) {
+                    displayProcesses(response.data.processes);
+                }
+            } catch (error) {
+                console.error('Failed to load processes:', error);
+            }
+        }
+
+        function displayProcesses(processes) {
+            const tbody = document.getElementById('processesTable');
+            
+            tbody.innerHTML = processes.map(proc => `
+                <tr>
+                    <td>${proc.pid}</td>
+                    <td>${proc.name}</td>
+                    <td>${proc.cpu.toFixed(1)}%</td>
+                    <td>${proc.memory.toFixed(1)}%</td>
+                    <td>${proc.user || 'N/A'}</td>
+                    <td>
+                        <button class="btn btn-error btn-sm" onclick="killProcess(${proc.pid})">
+                            Kill
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // Utility functions
+        async function apiCall(url, options = {}) {
+            const defaultOptions = {
+                headers: {
+                    'Authorization': `Bearer ${authToken}`,
+                    'Content-Type': 'application/json'
+                }
+            };
+            
+            const response = await fetch(url, { ...defaultOptions, ...options });
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.message || 'API call failed');
+            }
+            
+            return data;
+        }
+
+        function showAlert(alertId, message, type = 'info') {
+            const alert = document.getElementById(alertId);
+            const text = document.getElementById(alertId + 'Text');
+            
+            alert.className = `alert alert-${type}`;
+            text.textContent = message;
+            alert.classList.remove('hidden');
+        }
+
+        function hideAlert(alertId) {
+            document.getElementById(alertId).classList.add('hidden');
+        }
+
+        function showLoginSpinner(show) {
+            const spinner = document.getElementById('loginSpinner');
+            const text = document.getElementById('loginText');
+            
+            if (show) {
+                spinner.classList.remove('hidden');
+                text.classList.add('hidden');
+            } else {
+                spinner.classList.add('hidden');
+                text.classList.remove('hidden');
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (!bytes) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatUptime(seconds) {
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            
+            let result = '';
+            if (days > 0) result += `${days}d `;
+            if (hours > 0) result += `${hours}h `;
+            result += `${minutes}m`;
+            
+            return result;
+        }
+
+        // Modal functions
+        function showModal(modalId) {
+            document.getElementById(modalId).classList.add('show');
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.remove('show');
+        }
+
+        // File operations
+        function uploadFile() {
+            showModal('uploadModal');
+        }
+
+        function createFolder() {
+            const name = prompt('Enter folder name:');
+            if (name) {
+                apiCall('/api/files/mkdir', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        path: currentPath + '/' + name
+                    })
+                }).then(() => {
+                    loadFiles(currentPath);
+                }).catch(error => {
+                    alert('Failed to create folder: ' + error.message);
+                });
+            }
+        }
+
+        function openFile(path) {
+            // For now, just show an alert
+            alert('File viewer not implemented yet: ' + path);
+        }
+
+        function performUpload() {
+            const fileInput = document.getElementById('fileInput');
+            const files = fileInput.files;
+            
+            if (files.length === 0) {
+                alert('Please select files to upload');
+                return;
+            }
+            
+            const formData = new FormData();
+            for (let file of files) {
+                formData.append('files', file);
+            }
+            formData.append('path', currentPath);
+            
+            fetch('/api/files/upload', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${authToken}`
+                },
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    closeModal('uploadModal');
+                    loadFiles(currentPath);
+                } else {
+                    alert('Upload failed: ' + data.message);
+                }
+            })
+            .catch(error => {
+                alert('Upload error: ' + error.message);
+            });
+        }
+
+        // Service control
+        async function controlService(serviceName, action) {
+            try {
+                const response = await apiCall(`/api/system/services/${serviceName}/${action}`, {
+                    method: 'POST'
+                });
+                
+                if (response.success) {
+                    alert(`Service ${serviceName} ${action} completed successfully`);
+                    loadServices(); // Reload services list
+                } else {
+                    alert(`Failed to ${action} service: ` + response.message);
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        // Process control
+        async function killProcess(pid) {
+            if (confirm(`Are you sure you want to kill process ${pid}?`)) {
+                try {
+                    const response = await apiCall(`/api/system/processes/${pid}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    if (response.success) {
+                        alert('Process terminated successfully');
+                        loadProcesses(); // Reload processes list
+                    } else {
+                        alert('Failed to kill process: ' + response.message);
+                    }
+                } catch (error) {
+                    alert('Error: ' + error.message);
+                }
+            }
+        }
+
+        // Handle responsive sidebar
+        window.addEventListener('resize', function() {
+            const sidebar = document.getElementById('sidebar');
+            const mainContent = document.querySelector('.main-content');
+            
+            if (window.innerWidth <= 768) {
+                sidebar.classList.remove('open');
+                mainContent.classList.remove('with-sidebar');
+            } else {
+                sidebar.classList.add('open');
+                mainContent.classList.add('with-sidebar');
+            }
+        });
+    </script>
+</body>
+</html>.json();
+                    currentUser = data.user;
+                    showApp();
+                } else {
+                    showLogin();
+                }
+            } catch (error) {
+                console.error('Token verification failed:', error);
+                showLogin();
+            }
+        }
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            
+            showLoginSpinner(true);
+            hideAlert('loginAlert');
+            
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const data = await response
