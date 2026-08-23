@@ -8,6 +8,7 @@ const { validateUserManagement } = require('../middleware/validationMiddleware')
 const logger = require('../config/logger');
 const config = require('../config/config');
 const database = require('../config/database');
+const { getDefaultPermissions } = require('../config/permissions');
 
 // Get all users
 router.get('/', requirePermission('users:read'), async (req, res) => {
@@ -690,32 +691,5 @@ router.get('/stats/summary', requirePermission('users:read'), async (req, res) =
     });
   }
 });
-
-// Helper function to get default permissions
-function getDefaultPermissions(role) {
-  const permissions = {
-    admin: [
-      'system:read', 'system:write', 'system:execute',
-      'files:read', 'files:write', 'files:delete',
-      'users:read', 'users:write', 'users:delete',
-      'services:read', 'services:write',
-      'database:read', 'database:write',
-      'monitoring:read', 'monitoring:write',
-      'settings:read', 'settings:write'
-    ],
-    user: [
-      'files:read', 'files:write',
-      'monitoring:read',
-      'system:read'
-    ],
-    viewer: [
-      'files:read',
-      'monitoring:read',
-      'system:read'
-    ]
-  };
-
-  return permissions[role] || permissions.viewer;
-}
 
 module.exports = router;

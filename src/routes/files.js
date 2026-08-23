@@ -7,13 +7,14 @@ const path = require('path');
 const archiver = require('archiver');
 const unzipper = require('unzipper');
 const { promisify } = require('util');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { requirePermission } = require('../middleware/authMiddleware');
 const { body, param, query, validationResult } = require('express-validator');
 const logger = require('../config/logger');
 const config = require('../config/config');
+const broadcast = require('../sockets/broadcast');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -63,11 +64,12 @@ router.get('/browse',
         });
       }
 
-      const targetPath = req.query.path || config.SYSTEM.WEB_ROOT;
       const showHidden = req.query.showHidden === 'true';
-      
-      // Security: Prevent directory traversal
-      const safePath = path.resolve(targetPath);
+
+      // Default to home dir; fall back to uploads if it doesn't exist
+      let targetPath = req.query.path || config.SYSTEM.HOME_DIR || config.UPLOAD.UPLOAD_PATH;
+      let safePath = path.resolve(targetPath);
+
       if (!isPathSafe(safePath)) {
         return res.status(403).json({
           success: false,
@@ -75,32 +77,45 @@ router.get('/browse',
         });
       }
 
-      const items = await fs.readdir(safePath);
-      const fileList = [];
-
-      for (const item of items) {
-        if (!showHidden && item.startsWith('.')) continue;
-
-        const itemPath = path.join(safePath, item);
-        const stats = await fs.stat(itemPath);
-        
-        fileList.push({
-          name: item,
-          path: itemPath,
-          type: stats.isDirectory() ? 'directory' : 'file',
-          size: stats.size,
-          modified: stats.mtime,
-          permissions: await getFilePermissions(itemPath),
-          owner: stats.uid,
-          group: stats.gid
-        });
+      // If path doesn't exist, fall back to uploads dir
+      try {
+        await fs.access(safePath);
+      } catch {
+        targetPath = config.UPLOAD.UPLOAD_PATH;
+        safePath = path.resolve(targetPath);
+        await fs.mkdir(targetPath, { recursive: true });
       }
 
-      // Sort: directories first, then files
+      const entries = await fs.readdir(safePath, { withFileTypes: true });
+      const visible = showHidden ? entries : entries.filter(e => !e.name.startsWith('.'));
+
+      // Stat all entries in parallel instead of one-by-one
+      const fileList = (await Promise.all(
+        visible.map(async (dirent) => {
+          const itemPath = path.join(safePath, dirent.name);
+          try {
+            const stats = await fs.stat(itemPath);
+            const isDir = dirent.isDirectory();
+            return {
+              name: dirent.name,
+              path: itemPath,
+              type: isDir ? 'directory' : 'file',
+              isDirectory: isDir,
+              size: stats.size,
+              modified: stats.mtime,
+              permissions: config.SYSTEM.IS_WINDOWS ? 'N/A' : '0' + (stats.mode & 0o777).toString(8),
+              owner: stats.uid,
+              group: stats.gid,
+            };
+          } catch {
+            return null; // skip inaccessible items
+          }
+        })
+      )).filter(Boolean);
+
+      // Sort: directories first, then files alphabetically
       fileList.sort((a, b) => {
-        if (a.type !== b.type) {
-          return a.type === 'directory' ? -1 : 1;
-        }
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
 
@@ -109,7 +124,7 @@ router.get('/browse',
         data: {
           currentPath: safePath,
           parentPath: path.dirname(safePath),
-          items: fileList
+          files: fileList,
         }
       });
     } catch (error) {
@@ -233,7 +248,8 @@ router.post('/write',
       await fs.writeFile(safePath, content, encoding);
       
       logger.info(`File written by ${req.user.username}: ${safePath}`);
-      
+      broadcast.broadcastFileOperation('write', { path: safePath, user: req.user.username });
+
       res.json({
         success: true,
         message: 'File saved successfully',
@@ -369,7 +385,8 @@ router.post('/mkdir',
       await fs.mkdir(safePath, { recursive });
       
       logger.info(`Directory created by ${req.user.username}: ${safePath}`);
-      
+      broadcast.broadcastFileOperation('mkdir', { path: safePath, user: req.user.username });
+
       res.json({
         success: true,
         message: 'Directory created successfully',
@@ -431,7 +448,8 @@ router.delete('/delete',
       }
       
       logger.info(`Deleted by ${req.user.username}: ${safePath}`);
-      
+      broadcast.broadcastFileOperation('delete', { path: safePath, user: req.user.username });
+
       res.json({
         success: true,
         message: 'Item deleted successfully'
@@ -481,7 +499,8 @@ router.post('/move',
       await fs.rename(sourcePath, destPath);
       
       logger.info(`Moved by ${req.user.username}: ${sourcePath} -> ${destPath}`);
-      
+      broadcast.broadcastFileOperation('move', { source: sourcePath, destination: destPath, user: req.user.username });
+
       res.json({
         success: true,
         message: 'Item moved successfully',
@@ -541,7 +560,8 @@ router.post('/copy',
       }
       
       logger.info(`Copied by ${req.user.username}: ${sourcePath} -> ${destPath}`);
-      
+      broadcast.broadcastFileOperation('copy', { source: sourcePath, destination: destPath, user: req.user.username });
+
       res.json({
         success: true,
         message: 'Item copied successfully',
@@ -596,11 +616,8 @@ router.post('/permissions',
         });
       }
 
-      const command = recursive 
-        ? `chmod -R ${mode} "${safePath}"`
-        : `chmod ${mode} "${safePath}"`;
-        
-      await execAsync(command);
+      const chmodArgs = recursive ? ['-R', mode, safePath] : [mode, safePath];
+      await execFileAsync('chmod', chmodArgs);
       
       logger.info(`Permissions changed by ${req.user.username}: ${safePath} -> ${mode}`);
       
@@ -689,11 +706,11 @@ router.post('/archive',
         });
       } else {
         // Use tar command for tar formats
-        const tarCommand = format === 'tar.gz' 
-          ? `tar -czf "${archivePath}" ${safePaths.map(p => `"${p}"`).join(' ')}`
-          : `tar -cf "${archivePath}" ${safePaths.map(p => `"${p}"`).join(' ')}`;
-          
-        await execAsync(tarCommand);
+        const tarArgs = format === 'tar.gz'
+          ? ['-czf', archivePath, ...safePaths]
+          : ['-cf', archivePath, ...safePaths];
+
+        await execFileAsync('tar', tarArgs);
         
         const stats = await fs.stat(archivePath);
         
@@ -756,11 +773,11 @@ router.post('/extract',
           .pipe(unzipper.Extract({ path: safeDestPath }))
           .promise();
       } else if (ext === '.tar' || archivePath.endsWith('.tar.gz')) {
-        const tarCommand = archivePath.endsWith('.tar.gz')
-          ? `tar -xzf "${safeArchivePath}" -C "${safeDestPath}"`
-          : `tar -xf "${safeArchivePath}" -C "${safeDestPath}"`;
-          
-        await execAsync(tarCommand);
+        const tarArgs = archivePath.endsWith('.tar.gz')
+          ? ['-xzf', safeArchivePath, '-C', safeDestPath]
+          : ['-xf', safeArchivePath, '-C', safeDestPath];
+
+        await execFileAsync('tar', tarArgs);
       } else {
         return res.status(400).json({
           success: false,
@@ -882,10 +899,42 @@ router.get('/search',
 );
 
 // Helper functions
+
+// The app's own install directory (src/routes -> src -> repo root) — never
+// let the file manager expose the panel's own secrets/DB/logs/VCS history,
+// regardless of what HOME_DIR/WEB_ROOT the operator configured.
+const APP_ROOT = path.resolve(__dirname, '..', '..');
+const SENSITIVE_APP_PATHS = [
+  path.join(APP_ROOT, '.env'),
+  path.join(APP_ROOT, 'data'),
+  path.join(APP_ROOT, 'logs'),
+  path.join(APP_ROOT, '.git')
+];
+
+// Broad OS-level directories that should never be reachable through the
+// file manager, even though it's otherwise intentionally allowed to browse
+// the rest of the host (this is a cPanel-style "manage my whole server"
+// tool, not a sandboxed per-app file manager).
+const FORBIDDEN_ROOTS = process.platform === 'win32'
+  ? [
+      'C:\\Windows\\System32\\config',
+      'C:\\Windows\\System32\\drivers\\etc',
+      'C:\\ProgramData\\Microsoft\\Crypto'
+    ]
+  : [
+      '/etc', '/root', '/boot', '/sys', '/proc',
+      '/var/lib/mysql', '/var/lib/postgresql'
+    ];
+
 function isPathSafe(targetPath) {
-  // Basic security check - prevent access to system directories
-  const forbidden = ['/etc/passwd', '/etc/shadow', '/etc/sudoers'];
-  return !forbidden.some(path => targetPath.startsWith(path));
+  const resolved = path.resolve(targetPath);
+  const isWithin = (base) => resolved === base || resolved.startsWith(base + path.sep);
+
+  if (SENSITIVE_APP_PATHS.some(isWithin)) return false;
+  if (FORBIDDEN_ROOTS.some(isWithin)) return false;
+  if (/[\\/]\.ssh([\\/]|$)/i.test(resolved)) return false;
+
+  return true;
 }
 
 async function getFilePermissions(filePath) {

@@ -1,28 +1,38 @@
 // Socket.IO Event Handlers for Real-time Communication
 const logger = require('../config/logger');
 const monitoringService = require('../services/monitoringService');
-const systemService = require('../services/systemService');
+const { SystemService, systemMonitor } = require('../services/systemService');
+const jobQueue = require('../jobs/jobQueue');
+const broadcast = require('./broadcast');
 
 module.exports = (io) => {
+  broadcast.setIO(io);
+
   // Store connected clients
   const connectedClients = new Map();
 
   io.on('connection', (socket) => {
-    logger.info(`Client connected: ${socket.id} (User: ${socket.userId})`);
+    const userInfo = socket.isAuthenticated ? 
+      `User: ${socket.userId} (${socket.userRole})` : 
+      'Unauthenticated';
+    logger.info(`Client connected: ${socket.id} (${userInfo})`);
     
     // Store client info
     connectedClients.set(socket.id, {
-      userId: socket.userId,
-      userRole: socket.userRole,
+      userId: socket.userId || null,
+      userRole: socket.userRole || 'guest',
+      isAuthenticated: socket.isAuthenticated || false,
       connectedAt: new Date(),
       lastActivity: new Date()
     });
 
-    // Join user-specific room
-    socket.join(`user_${socket.userId}`);
+    // Join user-specific room (only if authenticated)
+    if (socket.userId) {
+      socket.join(`user_${socket.userId}`);
+    }
     
     // Join role-specific room
-    socket.join(`role_${socket.userRole}`);
+    socket.join(`role_${socket.userRole || 'guest'}`);
 
     // Send initial connection data
     socket.emit('connected', {
@@ -34,18 +44,30 @@ module.exports = (io) => {
     // Handle real-time monitoring requests
     socket.on('subscribe_monitoring', async (data) => {
       try {
-        logger.info(`Client ${socket.id} subscribed to monitoring`);
-        
-        // Join monitoring room
+        if (!socket.isAuthenticated) {
+          socket.emit('error', { message: 'Authentication required to subscribe to monitoring' });
+          return;
+        }
+
+        logger.info(`Client ${socket.id} (User: ${socket.userId}) subscribed to monitoring`);
         socket.join('monitoring');
-        
+
         // Send initial monitoring data
-        const stats = await systemService.getSystemStats();
-        socket.emit('monitoring_data', {
-          type: 'initial',
-          data: stats,
-          timestamp: new Date().toISOString()
-        });
+        try {
+          const stats = await systemMonitor.getRealtimeStats();
+          socket.emit('monitoring_data', {
+            type: 'initial',
+            data: stats,
+            timestamp: new Date().toISOString()
+          });
+        } catch (error) {
+          console.error('Error getting system stats:', error);
+          socket.emit('monitoring_data', {
+            type: 'error',
+            message: 'Failed to get system stats',
+            timestamp: new Date().toISOString()
+          });
+        }
         
         // Update last activity
         const client = connectedClients.get(socket.id);
@@ -68,14 +90,38 @@ module.exports = (io) => {
       logger.info(`Client ${socket.id} unsubscribed from monitoring`);
     });
 
+    // Subscribe to background job updates
+    socket.on('subscribe_jobs', () => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required to subscribe to jobs' });
+        return;
+      }
+      socket.join('jobs');
+      // Send current job state immediately so the panel populates on load
+      socket.emit('jobs:snapshot', jobQueue.getJobs());
+      logger.info(`Client ${socket.id} (User: ${socket.userId}) subscribed to jobs`);
+    });
+
+    socket.on('unsubscribe_jobs', () => {
+      socket.leave('jobs');
+    });
+
     // Handle file operations
     socket.on('subscribe_file_operations', () => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
       socket.join('file_operations');
       logger.info(`Client ${socket.id} subscribed to file operations`);
     });
 
     // Handle system logs subscription
     socket.on('subscribe_logs', (data) => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
       const { logType } = data;
       socket.join(`logs_${logType}`);
       logger.info(`Client ${socket.id} subscribed to ${logType} logs`);
@@ -83,60 +129,26 @@ module.exports = (io) => {
 
     // Handle service status subscription
     socket.on('subscribe_services', () => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
       socket.join('services');
       logger.info(`Client ${socket.id} subscribed to service status`);
     });
 
+    socket.on('unsubscribe_services', () => {
+      socket.leave('services');
+    });
+
     // Handle process monitoring
     socket.on('subscribe_processes', () => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
       socket.join('processes');
       logger.info(`Client ${socket.id} subscribed to process monitoring`);
-    });
-
-    // Handle terminal session requests
-    socket.on('request_terminal', (data) => {
-      if (socket.userRole === 'admin') {
-        socket.join('terminal');
-        logger.info(`Admin ${socket.userId} requested terminal access`);
-        socket.emit('terminal_ready', {
-          message: 'Terminal access granted',
-          sessionId: socket.id
-        });
-      } else {
-        socket.emit('terminal_denied', {
-          message: 'Terminal access denied - insufficient permissions'
-        });
-      }
-    });
-
-    // Handle terminal commands
-    socket.on('terminal_command', async (data) => {
-      if (socket.userRole === 'admin' && socket.rooms.has('terminal')) {
-        try {
-          const { command } = data;
-          
-          // Log command execution
-          logger.info(`Terminal command executed by ${socket.userId}: ${command}`);
-          
-          // Execute command (implement with proper security)
-          const result = await executeTerminalCommand(command);
-          
-          socket.emit('terminal_output', {
-            command,
-            output: result.output,
-            error: result.error,
-            timestamp: new Date().toISOString()
-          });
-          
-        } catch (error) {
-          socket.emit('terminal_output', {
-            command: data.command,
-            output: '',
-            error: error.message,
-            timestamp: new Date().toISOString()
-          });
-        }
-      }
     });
 
     // Handle chat messages (for admin communication)
@@ -220,14 +232,46 @@ module.exports = (io) => {
     });
   });
 
-  // Set up monitoring service event listeners
-  monitoringService.on('systemStats', (stats) => {
-    io.to('monitoring').emit('monitoring_data', {
-      type: 'update',
-      data: stats,
-      timestamp: new Date().toISOString()
-    });
+  // Job completion → broadcast page:refresh to all connected clients
+  const JOB_PAGE_MAP = {
+    service_control: 'services',
+    ssl_issue:       'ssl',
+    ssl_renew:       'ssl',
+    backup_create:   'backups',
+    backup_restore:  'backups',
+  };
+
+  jobQueue.emitter.on('job:done', (job) => {
+    const page = JOB_PAGE_MAP[job.type];
+    if (page) {
+      io.emit('page:refresh', { page, jobStatus: job.status, jobId: job.id });
+    }
   });
+
+  // Service status poller — push a refresh signal to the services room every 30 s
+  // so the UI stays live even when services change outside the panel.
+  setInterval(() => {
+    io.to('services').emit('page:refresh', { page: 'services', source: 'poll' });
+  }, 30000);
+
+  // Start real-time system monitoring
+  systemMonitor.start(5000); // Update every 5 seconds
+
+  // Set up real-time monitoring listeners
+  systemMonitor.on('stats', (stats) => {
+    if (stats) {
+      io.to('monitoring').emit('systemStats', stats);
+      io.to('monitoring').emit('monitoring_data', {
+        type: 'update',
+        data: stats,
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
+  // monitoringService.on('systemStats') is intentionally omitted — real-time
+  // socket updates are handled by systemMonitor above. monitoringService stats
+  // are for DB storage and alerts only.
 
   monitoringService.on('alert', (alert) => {
     // Send to all admins
@@ -248,41 +292,6 @@ module.exports = (io) => {
       io.emit('notification', notification);
     }
   });
-
-  // Broadcast service status changes
-  const broadcastServiceStatus = (serviceName, status) => {
-    io.to('services').emit('service_status_change', {
-      service: serviceName,
-      status,
-      timestamp: new Date().toISOString()
-    });
-  };
-
-  // Broadcast process changes
-  const broadcastProcessChange = (processInfo) => {
-    io.to('processes').emit('process_change', {
-      process: processInfo,
-      timestamp: new Date().toISOString()
-    });
-  };
-
-  // Broadcast file operation results
-  const broadcastFileOperation = (operation, result) => {
-    io.to('file_operations').emit('file_operation_result', {
-      operation,
-      result,
-      timestamp: new Date().toISOString()
-    });
-  };
-
-  // Broadcast system logs
-  const broadcastSystemLog = (logType, logEntry) => {
-    io.to(`logs_${logType}`).emit('log_entry', {
-      type: logType,
-      entry: logEntry,
-      timestamp: new Date().toISOString()
-    });
-  };
 
   // Periodic connection cleanup
   setInterval(() => {
@@ -312,44 +321,12 @@ module.exports = (io) => {
 
   // Export functions for external use
   return {
-    broadcastServiceStatus,
-    broadcastProcessChange,
-    broadcastFileOperation,
-    broadcastSystemLog,
     getConnectedClients: () => Array.from(connectedClients.values()),
     getClientCount: () => connectedClients.size
   };
 };
 
 // Helper functions
-async function executeTerminalCommand(command) {
-  const { exec } = require('child_process');
-  const { promisify } = require('util');
-  const execAsync = promisify(exec);
-  
-  try {
-    // Security check - block dangerous commands
-    const dangerousCommands = [
-      'rm -rf', 'del /f', 'format', 'fdisk', 'mkfs',
-      'shutdown', 'reboot', 'halt', 'poweroff'
-    ];
-    
-    const isDangerous = dangerousCommands.some(dangerous => 
-      command.toLowerCase().includes(dangerous.toLowerCase())
-    );
-    
-    if (isDangerous) {
-      throw new Error('Command blocked for security reasons');
-    }
-    
-    const { stdout, stderr } = await execAsync(command, { timeout: 30000 });
-    return { output: stdout, error: stderr };
-    
-  } catch (error) {
-    return { output: '', error: error.message };
-  }
-}
-
 async function updateNotificationStatus(notificationId, userId) {
   try {
     const database = require('../config/database');

@@ -1,6 +1,19 @@
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const { getDefaultPermissions } = require('../src/config/permissions');
 
 exports.seed = async function(knex) {
+  // This seed creates demo accounts with well-known passwords (admin123!,
+  // user123!, viewer123!). Never let that land unchanged on a real customer
+  // deployment — refuse by default in production.
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_SEED !== 'true') {
+    throw new Error(
+      'Refusing to seed demo accounts with well-known passwords into a production database. ' +
+      'Set ALLOW_DEMO_SEED=true only if you understand the risk, and change every seeded ' +
+      'password immediately after.'
+    );
+  }
+
   // Clear existing entries
   await knex('activity_logs').del();
   await knex('notifications').del();
@@ -10,8 +23,12 @@ exports.seed = async function(knex) {
   await knex('server_configs').del();
   await knex('users').del();
 
-  // Create default admin user
-  const adminPassword = await bcrypt.hash('admin123!', 12);
+  // Create default admin user — random password unless explicitly overridden,
+  // printed once so a production ALLOW_DEMO_SEED run doesn't ship a
+  // documented, guessable credential.
+  const adminPasswordPlain = process.env.SEED_ADMIN_PASSWORD || crypto.randomBytes(12).toString('base64url');
+  const adminPassword = await bcrypt.hash(adminPasswordPlain, 12);
+  console.log(`Seeded admin user 'admin' with password: ${adminPasswordPlain} — change this immediately after first login.`);
   const [adminId] = await knex('users').insert({
     username: 'admin',
     email: 'admin@localhost',
@@ -19,14 +36,7 @@ exports.seed = async function(knex) {
     first_name: 'System',
     last_name: 'Administrator',
     role: 'admin',
-    permissions: JSON.stringify([
-      'system:read', 'system:write', 'system:execute',
-      'files:read', 'files:write', 'files:delete',
-      'users:read', 'users:write', 'users:delete',
-      'services:read', 'services:write',
-      'database:read', 'database:write',
-      'monitoring:read', 'settings:read', 'settings:write'
-    ]),
+    permissions: JSON.stringify(getDefaultPermissions('admin')),
     is_active: true,
     created_at: new Date(),
     updated_at: new Date()
@@ -41,10 +51,7 @@ exports.seed = async function(knex) {
     first_name: 'Default',
     last_name: 'User',
     role: 'user',
-    permissions: JSON.stringify([
-      'files:read', 'files:write',
-      'monitoring:read'
-    ]),
+    permissions: JSON.stringify(getDefaultPermissions('user')),
     is_active: true,
     created_at: new Date(),
     updated_at: new Date()
@@ -59,11 +66,7 @@ exports.seed = async function(knex) {
     first_name: 'Read Only',
     last_name: 'Viewer',
     role: 'viewer',
-    permissions: JSON.stringify([
-      'files:read',
-      'monitoring:read',
-      'system:read'
-    ]),
+    permissions: JSON.stringify(getDefaultPermissions('viewer')),
     is_active: true,
     created_at: new Date(),
     updated_at: new Date()
@@ -186,6 +189,16 @@ exports.seed = async function(knex) {
       config_value: '900000',
       config_type: 'number',
       description: 'Account lockout duration (ms)',
+      is_system: false,
+      updated_by: adminId,
+      created_at: new Date(),
+      updated_at: new Date()
+    },
+    {
+      config_key: 'logging.retention_days',
+      config_value: '30',
+      config_type: 'number',
+      description: 'Log retention period (days)',
       is_system: false,
       updated_by: adminId,
       created_at: new Date(),

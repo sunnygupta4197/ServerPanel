@@ -33,9 +33,14 @@ const servicesRoutes = require('./routes/services');
 const userRoutes = require('./routes/users');
 const settingsRoutes = require('./routes/settings');
 const monitoringRoutes = require('./routes/monitoring');
+const domainRoutes = require('./routes/domains');
+const sslRoutes = require('./routes/ssl');
+const emailRoutes = require('./routes/email');
+const backupRoutes = require('./routes/backups');
 
 // Import socket handlers
 const socketHandlers = require('./sockets/socketHandlers');
+const jobQueue = require('./jobs/jobQueue');
 
 class ServerPanelApp {
   constructor() {
@@ -43,13 +48,21 @@ class ServerPanelApp {
     this.server = http.createServer(this.app);
     this.io = socketIo(this.server, {
       cors: {
-        origin: process.env.FRONTEND_URL || "http://localhost:3000",
+        origin: config.FRONTEND.URL,
         methods: ["GET", "POST"]
       }
     });
-    this.port = process.env.PORT || 3000;
-    
-    this.initializeDatabase();
+    this.port = config.PORT;
+
+    // Callers (e.g. tests) that care whether the DB actually initialized can
+    // `await appInstance.dbInitPromise`. We still attach a no-op .catch here
+    // so a failure doesn't become an unhandled rejection that crashes the
+    // whole process (Node 15+ treats unhandled rejections as uncaught
+    // exceptions by default) — the real error is still logged below and
+    // available on the stored promise.
+    this.dbInitPromise = this.initializeDatabase();
+    this.dbInitPromise.catch(() => {});
+
     this.initializeMiddleware();
     this.initializeRoutes();
     this.initializeSockets();
@@ -61,14 +74,13 @@ class ServerPanelApp {
       await database.migrate.latest();
       logger.info('Database migrations completed successfully');
       
-      // Run seeds in development
-      if (process.env.NODE_ENV === 'development') {
+      if (process.env.SEED_DB === 'true') {
         await database.seed.run();
         logger.info('Database seeds completed successfully');
       }
     } catch (error) {
       logger.error('Database initialization failed:', error);
-      process.exit(1);
+      throw error;
     }
   }
 
@@ -78,24 +90,27 @@ class ServerPanelApp {
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'"],
-          scriptSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com", "https://fonts.googleapis.com"],
+          scriptSrc: ["'self'", "https://cdn.jsdelivr.net"],
+          scriptSrcAttr: ["'unsafe-inline'"],
+          fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com"],
           imgSrc: ["'self'", "data:", "https:"],
+          connectSrc: ["'self'", "ws:", "wss:", "https://cdn.jsdelivr.net"],
         },
       },
     }));
 
     // CORS configuration
     this.app.use(cors({
-      origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+      origin: config.FRONTEND.URL,
       credentials: true,
       optionsSuccessStatus: 200
     }));
 
     // Rate limiting
     const limiter = rateLimit({
-      windowMs: 15 * 60 * 1000, // 15 minutes
-      max: process.env.NODE_ENV === 'production' ? 100 : 1000,
+      windowMs: config.SECURITY.RATE_LIMIT_WINDOW,
+      max: config.NODE_ENV === 'test' ? 1000 : config.SECURITY.RATE_LIMIT_MAX,
       message: 'Too many requests from this IP, please try again later.',
       standardHeaders: true,
       legacyHeaders: false,
@@ -110,18 +125,18 @@ class ServerPanelApp {
 
     // Session configuration
     this.app.use(session({
-      secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
+      secret: config.SESSION_SECRET,
       resave: false,
       saveUninitialized: false,
       cookie: {
-        secure: process.env.NODE_ENV === 'production',
+        secure: config.NODE_ENV === 'production',
         httpOnly: true,
-        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+        maxAge: config.SECURITY.SESSION_TIMEOUT
       }
     }));
 
     // Logging middleware
-    if (process.env.NODE_ENV === 'production') {
+    if (config.NODE_ENV === 'production') {
       this.app.use(morgan('combined'));
     } else {
       this.app.use(morgan('dev'));
@@ -142,9 +157,18 @@ class ServerPanelApp {
 
   initializeRoutes() {
     // Health check
-    this.app.get('/health', (req, res) => {
-      res.status(200).json({
-        status: 'OK',
+    this.app.get('/health', async (req, res) => {
+      let dbHealthy = true;
+      try {
+        await database.raw('SELECT 1');
+      } catch (error) {
+        dbHealthy = false;
+        logger.error('Health check: database unreachable:', error);
+      }
+
+      res.status(dbHealthy ? 200 : 503).json({
+        status: dbHealthy ? 'OK' : 'DEGRADED',
+        database: dbHealthy ? 'connected' : 'unreachable',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         version: process.env.npm_package_version || '1.0.0'
@@ -160,34 +184,50 @@ class ServerPanelApp {
     this.app.use('/api/users', authenticateToken, userRoutes);
     this.app.use('/api/settings', authenticateToken, settingsRoutes);
     this.app.use('/api/monitoring', authenticateToken, monitoringRoutes);
+    this.app.use('/api/domains', authenticateToken, domainRoutes);
+    this.app.use('/api/ssl', authenticateToken, sslRoutes);
+    this.app.use('/api/email', authenticateToken, emailRoutes);
+    this.app.use('/api/backups', authenticateToken, backupRoutes);
 
-    // Serve frontend in production
-    if (process.env.NODE_ENV === 'production') {
-      this.app.get('*', (req, res) => {
-        res.sendFile(path.join(__dirname, '../public/index.html'));
-      });
-    }
+    // Serve frontend for all routes (SPA)
+    this.app.get('*', (req, res) => {
+      // Don't serve index.html for API routes
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: 'API endpoint not found' });
+      }
+      res.sendFile(path.join(__dirname, '../public/index.html'));
+    });
   }
 
   initializeSockets() {
     this.io.use((socket, next) => {
-      // Socket authentication middleware
-      const token = socket.handshake.auth.token;
-      if (!token) {
-        return next(new Error('Authentication error'));
-      }
-      
       const jwt = require('jsonwebtoken');
-      try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
-        socket.userId = decoded.id;
-        socket.userRole = decoded.role;
-        next();
-      } catch (err) {
-        next(new Error('Authentication error'));
+
+      // Check handshake auth token first, then fall back to auth_token cookie
+      let token = socket.handshake.auth.token;
+      if (!token) {
+        const cookieHeader = socket.handshake.headers.cookie || '';
+        const match = cookieHeader.match(/(?:^|;\s*)auth_token=([^;]+)/);
+        token = match ? decodeURIComponent(match[1]) : null;
       }
+
+      if (token) {
+        try {
+          const decoded = jwt.verify(token, config.JWT_SECRET);
+          socket.userId = decoded.id;
+          socket.userRole = decoded.role;
+          socket.isAuthenticated = true;
+        } catch {
+          socket.isAuthenticated = false;
+        }
+      } else {
+        socket.isAuthenticated = false;
+      }
+
+      next();
     });
 
+    jobQueue.setIO(this.io);
     socketHandlers(this.io);
   }
 
@@ -246,10 +286,10 @@ class ServerPanelApp {
   start() {
     this.server.listen(this.port, () => {
       logger.info(`🚀 ServerPanel Pro running on port ${this.port}`);
-      logger.info(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-      logger.info(`🔒 Security: ${process.env.NODE_ENV === 'production' ? 'Production' : 'Development'} mode`);
-      
-      if (process.env.NODE_ENV !== 'production') {
+      logger.info(`📊 Environment: ${config.NODE_ENV}`);
+      logger.info(`🔒 Security: ${config.NODE_ENV === 'production' ? 'Production' : 'Development'} mode`);
+
+      if (config.NODE_ENV !== 'production') {
         logger.info(`🌐 Access: http://localhost:${this.port}`);
         logger.info(`📚 API Docs: http://localhost:${this.port}/api/docs`);
       }

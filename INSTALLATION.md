@@ -26,6 +26,41 @@
 - **Redis**: 7.x (optional but recommended)
 - **Git**: For cloning the repository
 
+## ✅ Quick Deploy Checklist (per-customer instance)
+
+This project is deployed as one dedicated instance per customer — each customer
+gets their own server/VM, not a shared multi-tenant install. Before handing an
+instance to a real customer:
+
+1. **Generate real secrets** — do not deploy with the values from `.env.example`:
+   ```bash
+   openssl rand -base64 32   # JWT_SECRET
+   openssl rand -base64 32   # SESSION_SECRET
+   ```
+   As of this hardening pass, the app **refuses to start** when
+   `NODE_ENV=production` and `JWT_SECRET`/`SESSION_SECRET` are unset — this is
+   intentional, not a bug.
+2. **Set every `*_change_me` value in `.env`** — database, Redis, and SMTP
+   passwords all ship as placeholders in `.env.example`.
+3. **Run migrations against the real database**: `npm run migrate`.
+4. **Create the first admin account — do not use the demo seed in production.**
+   `npm run seed` (`seeds/seeds_data.js`) creates `admin`/`admin123!`,
+   `user`/`user123!`, `viewer`/`viewer123!` — publicly-known demo credentials.
+   It now refuses to run when `NODE_ENV=production` unless you explicitly set
+   `ALLOW_DEMO_SEED=true`, and even then generates and prints a random admin
+   password instead of the fixed one. Prefer creating the real admin directly
+   via `POST /api/auth/register` (see `src/routes/auth.js`) using a one-off
+   admin-privileged script or an already-authenticated admin session instead
+   of the demo seed.
+5. **Confirm `.env` is not readable by the app's own file manager** — the file
+   manager can browse the whole host by design; this hardening pass blocked
+   the app's own `.env`/`data/`/`logs/`/`.git` from being reachable through it
+   (`src/routes/files.js`'s `isPathSafe`), but double-check if you've changed
+   `HOME_DIR`/`WEB_ROOT`.
+6. **Verify `POST /api/system/execute` and the `terminal_command` socket event
+   are gone** (`404`/no handler) — they were raw arbitrary-shell-exec endpoints
+   removed in this hardening pass and must not be reintroduced.
+
 ## 🚀 Installation Methods
 
 ### Method 1: Docker Installation (Recommended)

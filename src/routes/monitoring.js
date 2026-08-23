@@ -224,6 +224,7 @@ router.put('/config',
           updates.push({
             config_key: `monitoring.${key}_threshold`,
             config_value: thresholds[key].toString(),
+            config_type: 'number',
             updated_by: req.user.id,
             updated_at: new Date()
           });
@@ -234,6 +235,7 @@ router.put('/config',
         updates.push({
           config_key: 'monitoring.alerts_enabled',
           config_value: alertsEnabled.toString(),
+          config_type: 'boolean',
           updated_by: req.user.id,
           updated_at: new Date()
         });
@@ -243,15 +245,23 @@ router.put('/config',
         updates.push({
           config_key: 'monitoring.check_interval',
           config_value: interval.toString(),
+          config_type: 'number',
           updated_by: req.user.id,
           updated_at: new Date()
         });
       }
 
       for (const update of updates) {
-        await database('server_configs')
-          .where('config_key', update.config_key)
-          .update(update);
+        const existing = await database('server_configs').where('config_key', update.config_key).first();
+        if (existing) {
+          await database('server_configs').where('config_key', update.config_key).update(update);
+        } else {
+          await database('server_configs').insert({
+            ...update,
+            is_system: false,
+            created_at: new Date()
+          });
+        }
       }
 
       logger.info(`Monitoring configuration updated by user ${req.user.username}`);

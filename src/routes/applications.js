@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { exec, spawn } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const fs = require('fs').promises;
 const path = require('path');
@@ -13,6 +13,7 @@ const config = require('../config/config');
 const database = require('../config/database');
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Application catalog with popular applications
 const APPLICATION_CATALOG = {
@@ -667,7 +668,7 @@ async function checkRequirements(requirements) {
       const hasWebServer = await Promise.all(
         requirements.webServer.map(async (server) => {
           try {
-            await execAsync(`which ${server}`);
+            await execFileAsync('which', [server]);
             return true;
           } catch {
             return false;
@@ -784,7 +785,7 @@ async function runInstallationScript(appId, options) {
   // Check if custom install script exists
   if (await fs.access(scriptPath).then(() => true).catch(() => false)) {
     // Run custom installation script
-    const { stdout, stderr } = await execAsync(`bash ${scriptPath}`, {
+    const { stdout, stderr } = await execFileAsync('bash', [scriptPath], {
       env: {
         ...process.env,
         INSTALL_PATH: options.installPath,
@@ -818,11 +819,11 @@ async function genericInstallation(appId, options) {
   // Set permissions
   if (config.SYSTEM.IS_WINDOWS) {
     // Windows permissions
-    await execAsync(`icacls "${options.installPath}" /grant "IIS_IUSRS:F"`);
+    await execFileAsync('icacls', [options.installPath, '/grant', 'IIS_IUSRS:F']);
   } else {
     // Linux permissions
-    await execAsync(`chown -R www-data:www-data "${options.installPath}"`);
-    await execAsync(`chmod -R 755 "${options.installPath}"`);
+    await execFileAsync('chown', ['-R', 'www-data:www-data', options.installPath]);
+    await execFileAsync('chmod', ['-R', '755', options.installPath]);
   }
   
   return 'Generic installation completed';

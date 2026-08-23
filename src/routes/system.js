@@ -1,28 +1,48 @@
 const express = require('express');
 const router = express.Router();
-const { exec, spawn } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const os = require('os');
 const fs = require('fs').promises;
 const path = require('path');
 const si = require('systeminformation');
 const { requireRole, requirePermission } = require('../middleware/authMiddleware');
-const { body, param, validationResult } = require('express-validator');
+const { body, param, query, validationResult } = require('express-validator');
 const logger = require('../config/logger');
 const config = require('../config/config');
+const broadcast = require('../sockets/broadcast');
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+// Service/unit names: alnum start, then alnum/underscore/dot/@/dash. No '/' allowed.
+const SERVICE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,127}$/;
+const ALLOWED_KILL_SIGNALS = ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGQUIT', 'SIGUSR1', 'SIGUSR2'];
+
+// Race a promise against a timeout, returning fallback on timeout or error
+const safe = (promise, fallback, ms = 3000) =>
+  Promise.race([
+    promise.catch(() => fallback),
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms))
+  ]);
+
+// Cache for slow/static system info (refreshes every 60s)
+let _infoCache = null;
+let _infoCacheAt = 0;
 
 // System information endpoint
 router.get('/info', requirePermission('system:read'), async (req, res) => {
   try {
-    const [cpu, memory, disks, network, system, battery] = await Promise.all([
-      si.cpu(),
-      si.mem(),
-      si.fsSize(),
-      si.networkInterfaces(),
-      si.system(),
-      si.battery()
+    const now = Date.now();
+    if (_infoCache && now - _infoCacheAt < 60000) {
+      return res.json({ success: true, data: _infoCache });
+    }
+
+    const [cpu, memory, disks, network, system] = await Promise.all([
+      safe(si.cpu(), {}),
+      safe(si.mem(), { total: os.totalmem(), free: os.freemem(), used: os.totalmem() - os.freemem(), available: os.freemem() }),
+      safe(si.fsSize(), []),
+      safe(si.networkInterfaces(), []),
+      safe(si.system(), {}),
     ]);
 
     const systemInfo = {
@@ -33,15 +53,19 @@ router.get('/info', requirePermission('system:read'), async (req, res) => {
         arch: os.arch(),
         release: os.release(),
         uptime: os.uptime(),
-        manufacturer: system.manufacturer,
-        model: system.model,
-        version: system.version
+        manufacturer: system.manufacturer || 'Unknown',
+        model: system.model || 'Unknown',
+        version: system.version || 'Unknown'
+      },
+      os: {
+        platform: os.platform(),
+        release: os.release(),
       },
       cpu: {
         manufacturer: cpu.manufacturer,
         brand: cpu.brand,
         speed: cpu.speed,
-        cores: cpu.cores,
+        cores: cpu.cores || os.cpus().length,
         physicalCores: cpu.physicalCores,
         processors: cpu.processors
       },
@@ -50,9 +74,9 @@ router.get('/info', requirePermission('system:read'), async (req, res) => {
         free: memory.free,
         used: memory.used,
         available: memory.available,
-        usage: ((memory.used / memory.total) * 100).toFixed(2)
+        usage: memory.total > 0 ? ((memory.used / memory.total) * 100).toFixed(2) : '0'
       },
-      disks: disks.map(disk => ({
+      storage: disks.map(disk => ({
         filesystem: disk.fs,
         type: disk.type,
         size: disk.size,
@@ -61,7 +85,7 @@ router.get('/info', requirePermission('system:read'), async (req, res) => {
         usage: disk.use,
         mount: disk.mount
       })),
-      network: network.map(iface => ({
+      network: network.filter(i => !i.internal).map(iface => ({
         iface: iface.iface,
         type: iface.type,
         ip4: iface.ip4,
@@ -70,71 +94,49 @@ router.get('/info', requirePermission('system:read'), async (req, res) => {
         speed: iface.speed,
         operstate: iface.operstate
       })),
-      battery: battery ? {
-        hasBattery: battery.hasbattery,
-        percent: battery.percent,
-        charging: battery.ischarging,
-        timeRemaining: battery.timeremaining
-      } : null
     };
 
-    res.json({
-      success: true,
-      data: systemInfo
-    });
+    _infoCache = systemInfo;
+    _infoCacheAt = now;
+
+    res.json({ success: true, data: systemInfo });
   } catch (error) {
     logger.error('Error getting system info:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve system information'
-    });
+    res.status(500).json({ success: false, message: 'Failed to retrieve system information' });
   }
 });
 
-// Real-time system stats
+// Real-time system stats (fast path — no process enumeration)
 router.get('/stats', requirePermission('system:read'), async (req, res) => {
   try {
-    const [currentLoad, memory, temp, processes] = await Promise.all([
-      si.currentLoad(),
-      si.mem(),
-      si.cpuTemperature(),
-      si.processes()
+    const [currentLoad, memory, temp] = await Promise.all([
+      safe(si.currentLoad(), { currentload: 0, currentload_user: 0, currentload_system: 0, currentload_idle: 100 }),
+      safe(si.mem(), { total: os.totalmem(), used: os.totalmem() - os.freemem(), free: os.freemem() }),
+      safe(si.cpuTemperature(), { main: null }),
     ]);
 
     const stats = {
       timestamp: new Date().toISOString(),
       cpu: {
-        usage: currentLoad.currentload.toFixed(2),
-        user: currentLoad.currentload_user.toFixed(2),
-        system: currentLoad.currentload_system.toFixed(2),
-        idle: currentLoad.currentload_idle.toFixed(2),
+        usage: ((currentLoad.currentload ?? 0)).toFixed(2),
+        user: ((currentLoad.currentload_user ?? 0)).toFixed(2),
+        system: ((currentLoad.currentload_system ?? 0)).toFixed(2),
+        idle: ((currentLoad.currentload_idle ?? 100)).toFixed(2),
         temperature: temp.main || null
       },
       memory: {
         total: memory.total,
         used: memory.used,
         free: memory.free,
-        usage: ((memory.used / memory.total) * 100).toFixed(2)
-      },
-      processes: {
-        all: processes.all,
-        running: processes.running,
-        blocked: processes.blocked,
-        sleeping: processes.sleeping
+        usage: memory.total > 0 ? ((memory.used / memory.total) * 100).toFixed(2) : '0'
       },
       loadAvg: os.loadavg()
     };
 
-    res.json({
-      success: true,
-      data: stats
-    });
+    res.json({ success: true, data: stats });
   } catch (error) {
     logger.error('Error getting system stats:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve system statistics'
-    });
+    res.status(500).json({ success: false, message: 'Failed to retrieve system statistics' });
   }
 });
 
@@ -176,10 +178,11 @@ router.get('/processes', requirePermission('system:read'), async (req, res) => {
 });
 
 // Kill process
-router.delete('/processes/:pid', 
+router.delete('/processes/:pid',
   requirePermission('system:write'),
   [
-    param('pid').isInt({ min: 1 }).withMessage('Invalid process ID')
+    param('pid').isInt({ min: 1 }).withMessage('Invalid process ID'),
+    body('signal').optional().isIn(ALLOWED_KILL_SIGNALS).withMessage('Invalid signal')
   ],
   async (req, res) => {
     try {
@@ -205,13 +208,14 @@ router.delete('/processes/:pid',
       }
 
       if (config.SYSTEM.IS_WINDOWS) {
-        await execAsync(`taskkill /PID ${pid} /F`);
+        await execFileAsync('taskkill', ['/PID', String(pid), '/F']);
       } else {
-        await execAsync(`kill -${signal} ${pid}`);
+        await execFileAsync('kill', [`-${signal}`, String(pid)]);
       }
 
       logger.info(`Process ${pid} killed by user ${req.user.username}`);
-      
+      broadcast.broadcastProcessChange({ pid: parseInt(pid), action: 'killed', signal });
+
       res.json({
         success: true,
         message: `Process ${pid} terminated successfully`
@@ -232,12 +236,12 @@ router.get('/services', requirePermission('system:read'), async (req, res) => {
     let services = [];
 
     if (config.SYSTEM.IS_WINDOWS) {
-      const { stdout } = await execAsync('sc query type= service state= all');
+      const { stdout } = await execFileAsync('sc', ['query', 'type=', 'service', 'state=', 'all']);
       // Parse Windows services output
       services = parseWindowsServices(stdout);
     } else {
       // Linux systemd services
-      const { stdout } = await execAsync('systemctl list-units --type=service --all --no-pager --output=json');
+      const { stdout } = await execFileAsync('systemctl', ['list-units', '--type=service', '--all', '--no-pager', '--output=json']);
       services = JSON.parse(stdout).map(service => ({
         name: service.unit,
         status: service.active,
@@ -263,7 +267,8 @@ router.get('/services', requirePermission('system:read'), async (req, res) => {
 router.post('/services/:name/:action',
   requirePermission('system:write'),
   [
-    param('name').isLength({ min: 1 }).withMessage('Service name is required'),
+    param('name').isLength({ min: 1, max: 128 }).withMessage('Service name is required')
+      .matches(SERVICE_NAME_RE).withMessage('Service name contains invalid characters'),
     param('action').isIn(['start', 'stop', 'restart', 'enable', 'disable']).withMessage('Invalid action')
   ],
   async (req, res) => {
@@ -278,18 +283,18 @@ router.post('/services/:name/:action',
       }
 
       const { name, action } = req.params;
-      let command;
 
       if (config.SYSTEM.IS_WINDOWS) {
         switch (action) {
           case 'start':
-            command = `sc start "${name}"`;
+            await execFileAsync('sc', ['start', name]);
             break;
           case 'stop':
-            command = `sc stop "${name}"`;
+            await execFileAsync('sc', ['stop', name]);
             break;
           case 'restart':
-            command = `sc stop "${name}" && sc start "${name}"`;
+            await execFileAsync('sc', ['stop', name]);
+            await execFileAsync('sc', ['start', name]);
             break;
           default:
             return res.status(400).json({
@@ -298,13 +303,12 @@ router.post('/services/:name/:action',
             });
         }
       } else {
-        command = `systemctl ${action} ${name}`;
+        await execFileAsync('systemctl', [action, name]);
       }
 
-      await execAsync(command);
-      
       logger.info(`Service ${name} ${action} executed by user ${req.user.username}`);
-      
+      broadcast.broadcastServiceStatus(name, action);
+
       res.json({
         success: true,
         message: `Service ${name} ${action} completed successfully`
@@ -320,10 +324,11 @@ router.post('/services/:name/:action',
 );
 
 // System logs
-router.get('/logs/:logType', 
+router.get('/logs/:logType',
   requirePermission('system:read'),
   [
-    param('logType').isIn(['system', 'auth', 'apache', 'nginx', 'mysql']).withMessage('Invalid log type')
+    param('logType').isIn(['system', 'auth', 'apache', 'nginx', 'mysql']).withMessage('Invalid log type'),
+    query('lines').optional().isInt({ min: 1, max: 5000 }).withMessage('Lines must be between 1 and 5000')
   ],
   async (req, res) => {
     try {
@@ -337,13 +342,16 @@ router.get('/logs/:logType',
       }
 
       const { logType } = req.params;
-      const { lines = 100 } = req.query;
-      
+      const lines = parseInt(req.query.lines, 10) || 100;
+
       let logFile;
-      
+
       if (config.SYSTEM.IS_WINDOWS) {
         // Windows Event Log
-        const { stdout } = await execAsync(`powershell "Get-EventLog -LogName System -Newest ${lines} | ConvertTo-Json"`);
+        const { stdout } = await execFileAsync('powershell.exe', [
+          '-NoProfile', '-NonInteractive', '-Command',
+          'Get-EventLog -LogName System -Newest ([int]$env:SP_LOG_LINES) | ConvertTo-Json'
+        ], { env: { ...process.env, SP_LOG_LINES: String(lines) } });
         const events = JSON.parse(stdout);
         
         return res.json({
@@ -377,7 +385,7 @@ router.get('/logs/:logType',
           });
         }
 
-        const { stdout } = await execAsync(`tail -n ${lines} "${logFile}" 2>/dev/null || echo "Log file not found"`);
+        const { stdout } = await execFileAsync('tail', ['-n', String(lines), logFile]);
         
         res.json({
           success: true,
@@ -393,66 +401,6 @@ router.get('/logs/:logType',
       res.status(500).json({
         success: false,
         message: 'Failed to read system logs'
-      });
-    }
-  }
-);
-
-// Execute system command (admin only)
-router.post('/execute',
-  requireRole('admin'),
-  [
-    body('command').isLength({ min: 1 }).withMessage('Command is required'),
-    body('timeout').optional().isInt({ min: 1000, max: 300000 }).withMessage('Timeout must be between 1-300 seconds')
-  ],
-  async (req, res) => {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation failed',
-          errors: errors.array()
-        });
-      }
-
-      const { command, timeout = 30000 } = req.body;
-      
-      // Security: Block dangerous commands
-      const dangerousCommands = [
-        'rm -rf', 'del /f', 'format', 'fdisk', 'mkfs',
-        'dd if=', 'shutdown', 'reboot', 'halt', 'poweroff'
-      ];
-      
-      const isDangerous = dangerousCommands.some(dangerous => 
-        command.toLowerCase().includes(dangerous.toLowerCase())
-      );
-      
-      if (isDangerous) {
-        return res.status(403).json({
-          success: false,
-          message: 'Command contains potentially dangerous operations'
-        });
-      }
-
-      const { stdout, stderr } = await execAsync(command, { timeout });
-      
-      logger.info(`Command executed by ${req.user.username}: ${command}`);
-      
-      res.json({
-        success: true,
-        data: {
-          command,
-          stdout,
-          stderr,
-          timestamp: new Date().toISOString()
-        }
-      });
-    } catch (error) {
-      logger.error('Error executing command:', error);
-      res.status(500).json({
-        success: false,
-        message: error.message || 'Command execution failed'
       });
     }
   }
@@ -478,21 +426,16 @@ router.post('/power/:action',
 
       const { action } = req.params;
       const { delay = 60 } = req.body;
-      
-      let command;
-      
-      if (config.SYSTEM.IS_WINDOWS) {
-        command = action === 'reboot' 
-          ? `shutdown /r /t ${delay}` 
-          : `shutdown /s /t ${delay}`;
-      } else {
-        command = action === 'reboot' 
-          ? `shutdown -r +${Math.ceil(delay / 60)}` 
-          : `shutdown -h +${Math.ceil(delay / 60)}`;
-      }
-      
+
       // Execute with no wait
-      exec(command);
+      if (config.SYSTEM.IS_WINDOWS) {
+        execFile('shutdown', action === 'reboot'
+          ? ['/r', '/t', String(delay)]
+          : ['/s', '/t', String(delay)]);
+      } else {
+        const minutes = `+${Math.ceil(delay / 60)}`;
+        execFile('shutdown', action === 'reboot' ? ['-r', minutes] : ['-h', minutes]);
+      }
       
       logger.warn(`System ${action} initiated by ${req.user.username} with ${delay}s delay`);
       
