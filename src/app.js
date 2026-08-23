@@ -37,6 +37,7 @@ const domainRoutes = require('./routes/domains');
 const sslRoutes = require('./routes/ssl');
 const emailRoutes = require('./routes/email');
 const backupRoutes = require('./routes/backups');
+const applicationRoutes = require('./routes/applications');
 
 // Import socket handlers
 const socketHandlers = require('./sockets/socketHandlers');
@@ -188,6 +189,7 @@ class ServerPanelApp {
     this.app.use('/api/ssl', authenticateToken, sslRoutes);
     this.app.use('/api/email', authenticateToken, emailRoutes);
     this.app.use('/api/backups', authenticateToken, backupRoutes);
+    this.app.use('/api/applications', authenticateToken, applicationRoutes);
 
     // Serve frontend for all routes (SPA)
     this.app.get('*', (req, res) => {
