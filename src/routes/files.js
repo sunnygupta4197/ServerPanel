@@ -915,6 +915,13 @@ const SENSITIVE_APP_PATHS = [
 // file manager, even though it's otherwise intentionally allowed to browse
 // the rest of the host (this is a cPanel-style "manage my whole server"
 // tool, not a sandboxed per-app file manager).
+//
+// Deliberately NOT blocking /root here: this app commonly runs as root
+// (service control on Linux needs it), in which case /root is
+// os.homedir() — the default browse path — so blocking it outright 403s
+// the file manager's default view for every root-run deployment. The
+// actual sensitive thing under there (SSH keys) is still covered by the
+// .ssh check below, for /root and every other user's home directory alike.
 const FORBIDDEN_ROOTS = process.platform === 'win32'
   ? [
       'C:\\Windows\\System32\\config',
@@ -922,7 +929,7 @@ const FORBIDDEN_ROOTS = process.platform === 'win32'
       'C:\\ProgramData\\Microsoft\\Crypto'
     ]
   : [
-      '/etc', '/root', '/boot', '/sys', '/proc',
+      '/etc', '/boot', '/sys', '/proc',
       '/var/lib/mysql', '/var/lib/postgresql'
     ];
 
