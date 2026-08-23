@@ -638,6 +638,19 @@ class ServerPanelApp {
           this.showToast(`Failed: ${job.label}`, 'error');
         }
       });
+
+      // Backend emits these (monitoringService's alert pipeline, and the
+      // service-control broadcast helpers) but nothing was listening —
+      // alerts/notifications only ever showed up if you happened to check
+      // the Alerts list manually, never live.
+      this.socket.on('system_alert', (payload) => this.handleAlert(payload.alert || payload));
+      this.socket.on('alert', (alert) => this.handleAlert(alert));
+      this.socket.on('notification', (notification) => this.handleNotification(notification));
+
+      this.socket.on('service_status_change', ({ service, status }) => {
+        this.showToast(`Service ${service}: ${status}`, 'info');
+        if (this.currentPage === 'services') this.loadServicesData();
+      });
     }
   }
 
@@ -2094,14 +2107,22 @@ class ServerPanelApp {
     }
   }
 
-  // Handle alert
+  // Handle alert (from monitoringService's threshold-check pipeline).
+  // severity is one of low/medium/high/critical (system_alerts.severity).
   handleAlert(alert) {
-    console.log('Alert received:', alert);
+    if (!alert) return;
+    const toastType = ['critical', 'high'].includes(alert.severity) ? 'error'
+      : alert.severity === 'medium' ? 'warning'
+      : 'info';
+    this.showToast(alert.title || alert.description || 'System alert', toastType);
   }
 
-  // Handle notification
+  // Handle notification (currently unreachable — nothing on the backend
+  // emits a 'notification' event yet; wired up so it's ready the moment
+  // something does, same as the socket listener above)
   handleNotification(notification) {
-    console.log('Notification received:', notification);
+    if (!notification) return;
+    this.showToast(notification.message || notification.title || 'New notification', 'info');
   }
 
   // Format uptime
@@ -2168,14 +2189,18 @@ class ServerPanelApp {
     console.log('Notification count updated');
   }
 
-  // Get alert icon based on severity
+  // Get alert icon based on severity (matches system_alerts.severity:
+  // low/medium/high/critical)
   getAlertIcon(severity) {
     switch (severity) {
       case 'critical':
       case 'error':
         return 'exclamation-circle';
+      case 'high':
       case 'warning':
         return 'exclamation-triangle';
+      case 'medium':
+        return 'exclamation';
       case 'info':
       case 'low':
         return 'info-circle';
