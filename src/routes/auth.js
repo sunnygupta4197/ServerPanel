@@ -2,12 +2,16 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const speakeasy = require('speakeasy');
 const { body, validationResult } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 const config = require('../config/config');
 const database = require('../config/database');
 const logger = require('../config/logger');
+const { getDefaultPermissions } = require('../config/permissions');
 const {
+  authenticateToken,
+  requireRole,
   generateToken,
   hashPassword,
   verifyPassword,
@@ -23,7 +27,7 @@ const {
 // Rate limiting for authentication endpoints
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // 10 attempts per window
+  max: process.env.NODE_ENV === 'test' ? 1000 : 10, // relaxed only for the test suite
   message: {
     error: 'Too many authentication attempts, please try again later'
   },
@@ -39,6 +43,7 @@ router.post('/login',
   async (req, res) => {
     try {
       const { username, password } = req.body;
+      console.log('Login attempt:', { username, passwordLength: password?.length });
       const clientIP = req.ip || req.connection.remoteAddress;
 
       // Check if account is locked
@@ -55,6 +60,8 @@ router.post('/login',
         .where('username', username)
         .where('is_active', true)
         .first();
+
+      console.log('User found:', user ? { id: user.id, username: user.username } : 'null');
 
       if (!user) {
         await recordFailedAttempt(username, clientIP);
@@ -101,10 +108,10 @@ router.post('/login',
 
       // Successful login
       await recordSuccessfulLogin(username, clientIP);
-      
-      // Generate JWT token
-      const token = generateToken(user);
-      
+
+      // Generate JWT token (twoFactorVerified=true since no 2FA challenge needed)
+      const token = generateToken(user, true);
+
       // Update last login
       await database('users')
         .where('id', user.id)
@@ -117,7 +124,14 @@ router.post('/login',
       // Log successful login
       logger.audit('user_login', user, 'authentication', { ip: clientIP });
 
-      // Return user data (without sensitive information)
+      // Set HttpOnly auth cookie
+      res.cookie('auth_token', token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: 24 * 60 * 60 * 1000
+      });
+
       const userData = {
         id: user.id,
         username: user.username,
@@ -131,7 +145,6 @@ router.post('/login',
       res.json({
         success: true,
         message: 'Login successful',
-        token,
         user: userData
       });
 
@@ -198,9 +211,9 @@ router.post('/verify-2fa',
         });
       }
 
-      // Generate full access token
-      const token = generateToken(user);
-      
+      // Generate full access token with 2FA verified
+      const token = generateToken(user, true);
+
       logger.audit('2fa_verification', user, 'authentication', { ip: clientIP });
 
       const userData = {
@@ -212,10 +225,17 @@ router.post('/verify-2fa',
         two_factor_enabled: true
       };
 
+      // Set HttpOnly auth cookie
+      res.cookie('auth_token', token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: 24 * 60 * 60 * 1000
+      });
+
       res.json({
         success: true,
         message: 'Two-factor authentication successful',
-        token,
         user: userData
       });
 
@@ -232,6 +252,8 @@ router.post('/verify-2fa',
 // Register new user (admin only)
 router.post('/register',
   authLimiter,
+  authenticateToken,
+  requireRole('admin'),
   validateRegistration,
   async (req, res) => {
     try {
@@ -295,7 +317,7 @@ router.post('/register',
 router.get('/verify', async (req, res) => {
   try {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = (authHeader && authHeader.split(' ')[1]) || req.cookies.auth_token;
 
     if (!token) {
       return res.status(401).json({
@@ -380,19 +402,19 @@ router.get('/verify', async (req, res) => {
 router.post('/logout', async (req, res) => {
   try {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = (authHeader && authHeader.split(' ')[1]) || req.cookies.auth_token;
 
     if (token) {
-      // Blacklist the token
       await blacklistToken(token);
-      
-      // Log logout
+
       if (req.user) {
         logger.audit('user_logout', req.user, 'authentication', {
           ip: req.ip || req.connection.remoteAddress
         });
       }
     }
+
+    res.clearCookie('auth_token', { httpOnly: true, sameSite: 'strict' });
 
     res.json({
       success: true,
@@ -411,6 +433,7 @@ router.post('/logout', async (req, res) => {
 // Change password
 router.post('/change-password',
   authLimiter,
+  authenticateToken,
   [
     body('currentPassword').isLength({ min: 1 }).withMessage('Current password is required'),
     body('newPassword').isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH })
@@ -489,7 +512,7 @@ router.post('/change-password',
 router.post('/refresh', async (req, res) => {
   try {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = (authHeader && authHeader.split(' ')[1]) || req.cookies.auth_token;
 
     if (!token) {
       return res.status(401).json({
@@ -526,15 +549,21 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
-    // Generate new token
-    const newToken = generateToken(user);
-    
+    // Generate new token preserving 2FA status
+    const newToken = generateToken(user, decoded.twoFactorVerified || false);
+
     // Blacklist old token
     await blacklistToken(token);
 
+    res.cookie('auth_token', newToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 24 * 60 * 60 * 1000
+    });
+
     res.json({
       success: true,
-      token: newToken,
       message: 'Token refreshed successfully'
     });
 
@@ -557,36 +586,12 @@ function generateTempToken(userId) {
 }
 
 function verifyTwoFactorCode(secret, code) {
-  // This would integrate with a 2FA library like speakeasy
-  // For now, return true for demo purposes
-  // In production, implement proper TOTP verification
-  return code === '123456'; // Placeholder
-}
-
-function getDefaultPermissions(role) {
-  const permissions = {
-    admin: [
-      'system:read', 'system:write', 'system:execute',
-      'files:read', 'files:write', 'files:delete',
-      'users:read', 'users:write', 'users:delete',
-      'services:read', 'services:write',
-      'database:read', 'database:write',
-      'monitoring:read', 'settings:read', 'settings:write',
-      'apps:read', 'apps:install', 'apps:uninstall', 'apps:configure'
-    ],
-    user: [
-      'files:read', 'files:write',
-      'monitoring:read',
-      'apps:read'
-    ],
-    viewer: [
-      'files:read',
-      'monitoring:read',
-      'system:read'
-    ]
-  };
-
-  return permissions[role] || permissions.viewer;
+  return speakeasy.totp.verify({
+    secret,
+    encoding: 'base32',
+    token: code,
+    window: 1
+  });
 }
 
 module.exports = router;

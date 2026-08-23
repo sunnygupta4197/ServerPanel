@@ -6,6 +6,14 @@ const config = require('../config/config');
 const logger = require('../config/logger');
 const database = require('../config/database');
 
+// In-memory blacklist cache — O(1) lookup before hitting DB.
+// Tokens blacklisted in a previous process run are caught by the DB fallback.
+const blacklistCache = new Set();
+
+// Debounce last_activity DB writes to at most once per 5 minutes per user.
+const activityCache = new Map();
+const ACTIVITY_DEBOUNCE = 5 * 60 * 1000;
+
 // Rate limiter for login attempts
 const loginLimiter = rateLimit({
   windowMs: config.SECURITY.LOCKOUT_TIME,
@@ -26,7 +34,7 @@ const loginLimiter = rateLimit({
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    const token = (authHeader && authHeader.split(' ')[1]) || req.cookies?.auth_token;
 
     if (!token) {
       return res.status(401).json({
@@ -35,47 +43,45 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
-    // Verify token
     const decoded = jwt.verify(token, config.JWT_SECRET);
-    
-    // Check if user still exists and is active
-    const user = await database('users')
-      .where({ id: decoded.id, is_active: true })
-      .first();
+
+    // Fast blacklist check — in-memory first, DB fallback for cross-restart correctness
+    if (blacklistCache.has(token)) {
+      return res.status(401).json({ success: false, message: 'Token has been revoked' });
+    }
+
+    // Fetch user and DB blacklist entry in parallel
+    const [user, blacklistedRow] = await Promise.all([
+      database('users').where({ id: decoded.id, is_active: true }).first(),
+      database('token_blacklist').where({ token }).first()
+    ]);
+
+    if (blacklistedRow) {
+      blacklistCache.add(token); // Warm cache so next request is O(1)
+      return res.status(401).json({ success: false, message: 'Token has been revoked' });
+    }
 
     if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid or expired token'
-      });
+      return res.status(401).json({ success: false, message: 'Invalid or expired token' });
     }
 
-    // Check if token is blacklisted (for logout functionality)
-    const blacklistedToken = await database('token_blacklist')
-      .where({ token })
-      .first();
-
-    if (blacklistedToken) {
-      return res.status(401).json({
-        success: false,
-        message: 'Token has been revoked'
-      });
-    }
-
-    // Add user info to request
     req.user = {
       id: user.id,
       username: user.username,
       email: user.email,
       role: user.role,
       permissions: JSON.parse(user.permissions || '[]'),
-      last_login: user.last_login
+      last_login: user.last_login,
+      twoFactorVerified: decoded.twoFactorVerified || false
     };
 
-    // Update last activity
-    await database('users')
-      .where({ id: user.id })
-      .update({ last_activity: new Date() });
+    // Debounced last_activity write — at most once per 5 min per user, fire-and-forget
+    const now = Date.now();
+    if (now - (activityCache.get(user.id) || 0) > ACTIVITY_DEBOUNCE) {
+      activityCache.set(user.id, now);
+      database('users').where({ id: user.id }).update({ last_activity: new Date() })
+        .catch(err => logger.error('Failed to update last_activity:', err));
+    }
 
     next();
   } catch (error) {
@@ -205,7 +211,12 @@ const validateRegistration = [
       }
       return value;
     }),
-    
+
+  body('role')
+    .optional()
+    .isIn(['admin', 'user', 'viewer'])
+    .withMessage('Role must be one of: admin, user, viewer'),
+
   (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -220,12 +231,13 @@ const validateRegistration = [
 ];
 
 // Generate JWT token
-const generateToken = (user) => {
+const generateToken = (user, twoFactorVerified = false) => {
   return jwt.sign(
     {
       id: user.id,
       username: user.username,
-      role: user.role
+      role: user.role,
+      twoFactorVerified: twoFactorVerified || !user.two_factor_enabled
     },
     config.JWT_SECRET,
     {
@@ -251,13 +263,15 @@ const blacklistToken = async (token) => {
   try {
     const decoded = jwt.decode(token);
     const expiresAt = new Date(decoded.exp * 1000);
-    
+
+    blacklistCache.add(token); // Immediate in-memory effect
+
     await database('token_blacklist').insert({
       token,
       expires_at: expiresAt,
       created_at: new Date()
     });
-    
+
     return true;
   } catch (error) {
     logger.error('Error blacklisting token:', error);
@@ -265,17 +279,21 @@ const blacklistToken = async (token) => {
   }
 };
 
-// Clean expired blacklisted tokens (should be run periodically)
+// Clean expired blacklisted tokens — call periodically (e.g. daily cron)
 const cleanExpiredTokens = async () => {
   try {
+    // Clear in-memory cache; non-expired entries are re-warmed on next miss
+    blacklistCache.clear();
+    activityCache.clear();
+
     const deleted = await database('token_blacklist')
       .where('expires_at', '<', new Date())
       .del();
-    
+
     if (deleted > 0) {
       logger.info(`Cleaned ${deleted} expired tokens from blacklist`);
     }
-    
+
     return deleted;
   } catch (error) {
     logger.error('Error cleaning expired tokens:', error);
@@ -310,8 +328,7 @@ const recordFailedAttempt = async (username, ip) => {
     
     const failedAttempts = (user.failed_attempts || 0) + 1;
     const updateData = {
-      failed_attempts: failedAttempts,
-      last_failed_attempt: new Date()
+      failed_attempts: failedAttempts
     };
     
     // Lock account if max attempts reached

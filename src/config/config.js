@@ -1,15 +1,28 @@
 const path = require('path');
 const os = require('os');
 
+// In production there is no safe default for a secret — booting with one
+// means every token/session is signed with a value sitting in this repo.
+// Dev/test keep a fallback so `npm run dev` and the test suite don't need
+// any setup.
+function requiredSecret(envVar, devFallback) {
+  const value = process.env[envVar];
+  if (value) return value;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(`${envVar} must be set when NODE_ENV=production — refusing to start with a default secret`);
+  }
+  return devFallback;
+}
+
 module.exports = {
   // Environment
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: process.env.PORT || 3000,
-  
+
   // Security
-  JWT_SECRET: process.env.JWT_SECRET || 'your-super-secure-jwt-secret-change-in-production',
+  JWT_SECRET: requiredSecret('JWT_SECRET', 'dev-only-jwt-secret-do-not-use-in-production'),
   JWT_EXPIRE: process.env.JWT_EXPIRE || '24h',
-  SESSION_SECRET: process.env.SESSION_SECRET || 'your-session-secret-change-in-production',
+  SESSION_SECRET: requiredSecret('SESSION_SECRET', 'dev-only-session-secret-do-not-use-in-production'),
   BCRYPT_ROUNDS: parseInt(process.env.BCRYPT_ROUNDS) || 12,
   
   // Database
@@ -21,14 +34,14 @@ module.exports = {
       user: process.env.DB_USER || 'serverpanel',
       password: process.env.DB_PASSWORD || '',
       database: process.env.DB_NAME || 'serverpanel',
-      filename: process.env.DB_FILE || path.join(__dirname, '../data/serverpanel.db')
+      filename: process.env.DB_FILE || path.join(__dirname, '../../data/serverpanel.db')
     },
     migrations: {
-      directory: path.join(__dirname, '../migrations'),
+      directory: path.join(__dirname, '../../migrations'),
       tableName: 'knex_migrations'
     },
     seeds: {
-      directory: path.join(__dirname, '../seeds')
+      directory: path.join(__dirname, '../../seeds')
     }
   },
   
@@ -140,7 +153,7 @@ module.exports = {
   
   // Frontend configuration
   FRONTEND: {
-    URL: process.env.FRONTEND_URL || 'http://localhost:3000',
+    URL: process.env.FRONTEND_URL || `http://localhost:${process.env.PORT || 3000}`,
     THEME: process.env.DEFAULT_THEME || 'dark',
     LANGUAGE: process.env.DEFAULT_LANGUAGE || 'en'
   },

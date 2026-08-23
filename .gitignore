@@ -1,1 +1,19 @@
 node_modules
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# runtime data / logs
+data/
+logs/
+.tmp/
+uploads/
+backups/
+certificates/
+coverage/
+
+# python side project (venv + local db)
+python/venv/
+python/instance/

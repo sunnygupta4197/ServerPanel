@@ -1,9 +1,10 @@
 const EventEmitter = require('events');
 const cron = require('node-cron');
-const systemService = require('./systemService');
+const { SystemService: systemService } = require('./systemService');
 const database = require('../config/database');
 const logger = require('../config/logger');
 const config = require('../config/config');
+const { cleanExpiredTokens } = require('../middleware/authMiddleware');
 
 class MonitoringService extends EventEmitter {
   constructor() {
@@ -85,16 +86,29 @@ class MonitoringService extends EventEmitter {
   async collectSystemMetrics() {
     try {
       const stats = await systemService.getSystemStats();
-      
+
+      // getSystemStats() is the fast path and deliberately omits process/network
+      // enumeration — fetch those separately for storage, tolerating failure.
+      const [processInfo, networkInfo] = await Promise.all([
+        systemService.getProcesses().catch(error => {
+          logger.warn('Could not get process info for metrics:', error.message);
+          return { total: 0, running: 0, processes: [] };
+        }),
+        systemService.getNetworkInterfaces().catch(error => {
+          logger.warn('Could not get network info for metrics:', error.message);
+          return { interfaces: [] };
+        })
+      ]);
+
       // Store in database
-      await this.storeMetrics(stats);
-      
+      await this.storeMetrics(stats, processInfo, networkInfo);
+
       // Check for alerts
       await this.checkAlerts(stats);
-      
+
       // Emit real-time data
       this.emit('systemStats', stats);
-      
+
       return stats;
     } catch (error) {
       logger.error('Error collecting system metrics:', error);
@@ -103,7 +117,7 @@ class MonitoringService extends EventEmitter {
   }
 
   // Store metrics in database
-  async storeMetrics(stats) {
+  async storeMetrics(stats, processInfo, networkInfo) {
     try {
       const metrics = {
         recorded_at: new Date(),
@@ -119,10 +133,10 @@ class MonitoringService extends EventEmitter {
         load_avg_1: stats.loadAverage[0],
         load_avg_5: stats.loadAverage[1],
         load_avg_15: stats.loadAverage[2],
-        processes_total: stats.processes.all,
-        processes_running: stats.processes.running,
+        processes_total: processInfo.total,
+        processes_running: processInfo.running,
         cpu_temperature: stats.cpu.temperature,
-        network_interfaces: JSON.stringify(stats.network)
+        network_interfaces: JSON.stringify(networkInfo.interfaces)
       };
 
       // Calculate disk usage from storage info
@@ -142,9 +156,9 @@ class MonitoringService extends EventEmitter {
       }
 
       await database('system_stats').insert(metrics);
-      
+
       // Store process snapshots (top 10 processes)
-      await this.storeProcessSnapshots(stats.processes.list);
+      await this.storeProcessSnapshots(processInfo.processes);
       
     } catch (error) {
       logger.error('Error storing metrics:', error);
@@ -456,6 +470,9 @@ class MonitoringService extends EventEmitter {
         .where('is_resolved', true)
         .del();
 
+      // Clean expired auth tokens
+      await cleanExpiredTokens();
+
       logger.info(`Cleanup completed: ${deletedStats} stats, ${deletedSnapshots} snapshots, ${deletedAlerts} alerts deleted`);
       
       this.emit('cleanup', {
@@ -549,9 +566,10 @@ class MonitoringService extends EventEmitter {
   async exportMetrics(format = 'prometheus') {
     try {
       const stats = await systemService.getSystemStats();
-      
+
       if (format === 'prometheus') {
-        return this.formatPrometheusMetrics(stats);
+        const processInfo = await systemService.getProcesses().catch(() => ({ total: 0 }));
+        return this.formatPrometheusMetrics(stats, processInfo);
       } else if (format === 'json') {
         return JSON.stringify(stats, null, 2);
       } else {
@@ -564,7 +582,7 @@ class MonitoringService extends EventEmitter {
   }
 
   // Format metrics in Prometheus format
-  formatPrometheusMetrics(stats) {
+  formatPrometheusMetrics(stats, processInfo) {
     const metrics = [];
     
     metrics.push(`# HELP cpu_usage_percent CPU usage percentage`);
@@ -585,7 +603,7 @@ class MonitoringService extends EventEmitter {
     
     metrics.push(`# HELP processes_total Total number of processes`);
     metrics.push(`# TYPE processes_total gauge`);
-    metrics.push(`processes_total ${stats.processes.all}`);
+    metrics.push(`processes_total ${processInfo.total}`);
     
     return metrics.join('\n');
   }

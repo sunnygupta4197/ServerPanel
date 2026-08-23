@@ -51,14 +51,23 @@ router.get('/info', requirePermission('database:read'), async (req, res) => {
       stats = result.rows[0];
     } else if (dbConfig.client === 'sqlite3') {
       const tables = await database.raw(`
-        SELECT COUNT(*) as table_count 
-        FROM sqlite_master 
-        WHERE type='table' AND name NOT LIKE 'sqlite_%'
+        SELECT COUNT(*) as table_count
+        FROM sqlite_master
+        WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'knex_%'
       `);
-      
+
+      let sizeMb = null;
+      try {
+        const dbFile = dbConfig.connection?.filename;
+        if (dbFile) {
+          const fsStat = await fs.stat(dbFile);
+          sizeMb = (fsStat.size / 1024 / 1024).toFixed(2);
+        }
+      } catch { /* ignore */ }
+
       stats = {
         table_count: tables[0].table_count,
-        size_mb: 'N/A'
+        size_mb: sizeMb,
       };
     }
 
@@ -112,16 +121,35 @@ router.get('/tables', requirePermission('database:read'), async (req, res) => {
       tables = result.rows;
     } else if (dbConfig.client === 'sqlite3') {
       const result = await database.raw(`
-        SELECT 
-          name as table_name,
-          type,
-          sql
-        FROM sqlite_master 
-        WHERE type='table' AND name NOT LIKE 'sqlite_%'
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'knex_%'
         ORDER BY name
       `);
-      
-      tables = result;
+
+      const tableNames = result.map(r => r.name);
+
+      // Get row count for each table in parallel
+      const counts = await Promise.all(
+        tableNames.map(name =>
+          database(name).count('* as count').then(r => parseInt(r[0].count, 10)).catch(() => 0)
+        )
+      );
+
+      // Try DBSTAT virtual table for per-table byte sizes
+      let sizeMap = {};
+      try {
+        const dbstatRows = await database.raw(
+          `SELECT name, SUM(pgsize) as bytes FROM dbstat GROUP BY name`
+        );
+        dbstatRows.forEach(r => { sizeMap[r.name] = r.bytes; });
+      } catch { /* DBSTAT not available; leave sizes as — */ }
+
+      tables = tableNames.map((name, i) => ({
+        name,
+        rows: counts[i],
+        size: sizeMap[name] != null ? Math.round(sizeMap[name] / 1024) + ' KB' : '—',
+        engine: 'SQLite',
+      }));
     }
 
     res.json({
@@ -275,95 +303,13 @@ router.get('/tables/:tableName/data',
   }
 );
 
-// Execute SQL query
-router.post('/query',
-  requirePermission('database:write'),
-  [
-    body('query').isLength({ min: 1 }).withMessage('Query is required'),
-    body('type').optional().isIn(['select', 'insert', 'update', 'delete', 'create', 'drop', 'alter'])
-  ],
-  async (req, res) => {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation failed',
-          errors: errors.array()
-        });
-      }
-
-      const { query, type } = req.body;
-      
-      // Security check - block dangerous operations
-      const dangerousPatterns = [
-        /DROP\s+DATABASE/i,
-        /TRUNCATE\s+TABLE/i,
-        /DELETE\s+FROM\s+users/i,
-        /UPDATE\s+users\s+SET\s+password/i,
-        /GRANT\s+ALL/i,
-        /REVOKE\s+ALL/i,
-        /CREATE\s+USER/i,
-        /ALTER\s+USER/i,
-        /DROP\s+USER/i
-      ];
-
-      const isDangerous = dangerousPatterns.some(pattern => pattern.test(query));
-      if (isDangerous) {
-        return res.status(403).json({
-          success: false,
-          message: 'Query contains potentially dangerous operations'
-        });
-      }
-
-      // Execute query
-      const startTime = Date.now();
-      const result = await database.raw(query);
-      const executionTime = Date.now() - startTime;
-
-      // Log query execution
-      logger.info(`SQL query executed by ${req.user.username}: ${query.substring(0, 100)}...`);
-
-      // Format result based on query type
-      let formattedResult;
-      if (query.trim().toLowerCase().startsWith('select')) {
-        formattedResult = {
-          type: 'select',
-          rows: Array.isArray(result) ? result : (result.rows || result[0] || []),
-          rowCount: Array.isArray(result) ? result.length : (result.rows?.length || result[0]?.length || 0)
-        };
-      } else {
-        formattedResult = {
-          type: 'modification',
-          affectedRows: result.affectedRows || result.rowCount || 0,
-          insertId: result.insertId || null
-        };
-      }
-
-      res.json({
-        success: true,
-        data: {
-          result: formattedResult,
-          executionTime,
-          query: query.substring(0, 200) + (query.length > 200 ? '...' : '')
-        }
-      });
-    } catch (error) {
-      logger.error('Error executing SQL query:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Query execution failed',
-        error: error.message
-      });
-    }
-  }
-);
 
 // Create database backup
 router.post('/backup',
   requirePermission('database:write'),
   [
-    body('name').optional().isLength({ min: 1, max: 100 }),
+    body('name').optional().isLength({ min: 1, max: 100 })
+      .matches(/^[a-zA-Z0-9_-]+$/).withMessage('Name may only contain letters, numbers, dashes, and underscores'),
     body('compress').optional().isBoolean(),
     body('includeData').optional().isBoolean()
   ],
@@ -475,15 +421,26 @@ router.post('/restore',
       }
 
       const { backupPath } = req.body;
-      
+
       // Security check - ensure backup path is within backups directory
       const resolvedPath = path.resolve(backupPath);
       const backupsDir = path.resolve(config.PATHS.BACKUPS);
-      
-      if (!resolvedPath.startsWith(backupsDir)) {
+
+      if (resolvedPath !== backupsDir && !resolvedPath.startsWith(backupsDir + path.sep)) {
         return res.status(403).json({
           success: false,
           message: 'Invalid backup path'
+        });
+      }
+
+      // resolvedPath is now confirmed to live inside backupsDir, but its
+      // filename portion is still attacker-controlled and gets embedded in a
+      // shell command below (gunzip/mysql/psql/sqlite3 pipelines) — reject
+      // anything with shell metacharacters even though it's path-contained.
+      if (!/^[a-zA-Z0-9._-]+$/.test(path.basename(resolvedPath))) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid backup file name'
         });
       }
 
@@ -611,8 +568,8 @@ router.delete('/backups/:backupName',
       // Security check
       const resolvedPath = path.resolve(backupPath);
       const backupsDir = path.resolve(config.PATHS.BACKUPS);
-      
-      if (!resolvedPath.startsWith(backupsDir)) {
+
+      if (resolvedPath !== backupsDir && !resolvedPath.startsWith(backupsDir + path.sep)) {
         return res.status(403).json({
           success: false,
           message: 'Invalid backup path'

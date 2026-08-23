@@ -208,7 +208,7 @@
       "**/tests/**/*.test.js",
       "**/__tests__/**/*.js"
     ],
-    "setupFilesAfterEnv": [
+    "setupFiles": [
       "<rootDir>/tests/setup.js"
     ]
   },

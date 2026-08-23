@@ -43,3 +43,9 @@ exports.up = async function(knex) {
     table.string('license', 50);
   });
 }
+
+exports.down = async function(knex) {
+  // Drop tables in reverse order
+  await knex.schema.dropTableIfExists('application_catalog');
+  await knex.schema.dropTableIfExists('installed_applications');
+}
