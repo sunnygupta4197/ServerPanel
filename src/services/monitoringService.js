@@ -199,7 +199,9 @@ class MonitoringService extends EventEmitter {
     if (stats.cpu.usage > this.alertThresholds.cpu) {
       const alert = {
         alert_type: 'high_cpu_usage',
-        severity: stats.cpu.usage > 90 ? 'critical' : 'warning',
+        // system_alerts.severity is a DB-level CHECK/enum restricted to
+        // low/medium/high/critical - 'warning' silently fails the insert.
+        severity: stats.cpu.usage > 90 ? 'critical' : 'medium',
         title: 'High CPU Usage Detected',
         description: `CPU usage is ${stats.cpu.usage}% (threshold: ${this.alertThresholds.cpu}%)`,
         data: JSON.stringify({
@@ -215,7 +217,7 @@ class MonitoringService extends EventEmitter {
     if (stats.memory.usage > this.alertThresholds.memory) {
       const alert = {
         alert_type: 'high_memory_usage',
-        severity: stats.memory.usage > 95 ? 'critical' : 'warning',
+        severity: stats.memory.usage > 95 ? 'critical' : 'medium',
         title: 'High Memory Usage Detected',
         description: `Memory usage is ${stats.memory.usage}% (threshold: ${this.alertThresholds.memory}%)`,
         data: JSON.stringify({
@@ -233,7 +235,7 @@ class MonitoringService extends EventEmitter {
     if (loadPerCore > this.alertThresholds.load) {
       const alert = {
         alert_type: 'high_system_load',
-        severity: loadPerCore > 3 ? 'critical' : 'warning',
+        severity: loadPerCore > 3 ? 'critical' : 'medium',
         title: 'High System Load Detected',
         description: `System load is ${stats.loadAverage[0].toFixed(2)} (${loadPerCore.toFixed(2)} per core)`,
         data: JSON.stringify({

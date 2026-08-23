@@ -526,7 +526,9 @@ router.post('/alerts',
   [
     body('title').isLength({ min: 1, max: 255 }).withMessage('Title is required and must be less than 255 characters'),
     body('description').isLength({ min: 1, max: 1000 }).withMessage('Description is required and must be less than 1000 characters'),
-    body('severity').isIn(['info', 'warning', 'error', 'critical']).withMessage('Invalid severity level'),
+    // Must match the system_alerts.severity CHECK constraint in the DB schema -
+    // 'info'/'warning'/'error' pass this validator but then fail the insert.
+    body('severity').isIn(['low', 'medium', 'high', 'critical']).withMessage('Invalid severity level'),
     body('alert_type').isLength({ min: 1, max: 50 }).withMessage('Alert type is required')
   ],
   async (req, res) => {
