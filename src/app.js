@@ -42,6 +42,7 @@ const applicationRoutes = require('./routes/applications');
 // Import socket handlers
 const socketHandlers = require('./sockets/socketHandlers');
 const jobQueue = require('./jobs/jobQueue');
+const backupScheduler = require('./jobs/backupScheduler');
 
 class ServerPanelApp {
   constructor() {
@@ -231,6 +232,7 @@ class ServerPanelApp {
 
     jobQueue.setIO(this.io);
     socketHandlers(this.io);
+    backupScheduler.start();
   }
 
   initializeErrorHandling() {

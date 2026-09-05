@@ -1,10 +1,12 @@
 const express = require('express');
 const router = express.Router();
+const fs = require('fs').promises;
 const { body, param, validationResult } = require('express-validator');
 const { requirePermission } = require('../middleware/authMiddleware');
 const database = require('../config/database');
 const logger = require('../config/logger');
 const jobQueue = require('../jobs/jobQueue');
+const backupService = require('../services/backupService');
 
 // List backups
 router.get('/', requirePermission('backups:read'), async (req, res) => {
@@ -21,11 +23,13 @@ router.get('/', requirePermission('backups:read'), async (req, res) => {
   }
 });
 
-// Create backup (dispatched as background job)
+// Create backup (dispatched as background job; runs a real DB dump / web
+// root copy / email export via backupService, not a simulation)
 router.post('/', requirePermission('backups:write'),
   [
     body('type').isIn(['full', 'files', 'database', 'emails']).withMessage('Invalid backup type'),
-    body('name').optional().isString().isLength({ max: 255 }),
+    body('name').optional().isString().isLength({ max: 255 }).matches(/^[a-zA-Z0-9_-]+$/)
+      .withMessage('Name may only contain letters, numbers, dashes, and underscores'),
   ],
   async (req, res) => {
     try {
@@ -35,7 +39,6 @@ router.post('/', requirePermission('backups:write'),
       const { type, name } = req.body;
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       const backupName = name || `${type}-backup-${ts}`;
-      const backupPath = `/backups/${backupName}.tar.gz`;
 
       const job = jobQueue.createJob('backup_create', `Create ${type} backup`, req.user.id);
 
@@ -44,7 +47,6 @@ router.post('/', requirePermission('backups:write'),
         name: backupName,
         type,
         status: 'queued',
-        path: backupPath,
         size_bytes: 0,
         job_id: job.id,
         created_at: new Date(),
@@ -65,41 +67,24 @@ router.post('/', requirePermission('backups:write'),
             started_at: new Date(),
             updated_at: new Date()
           });
-          jobQueue.updateJob(job.id, { status: 'running', progress: 5 });
+          jobQueue.updateJob(job.id, { status: 'running', progress: 0 });
 
-          // Simulate backup stages
-          const stages = type === 'full'
-            ? [
-                { label: 'Preparing', progress: 10, ms: 500 },
-                { label: 'Backing up files', progress: 35, ms: 1500 },
-                { label: 'Backing up databases', progress: 65, ms: 1000 },
-                { label: 'Backing up emails', progress: 85, ms: 500 },
-                { label: 'Compressing archive', progress: 95, ms: 500 }
-              ]
-            : [
-                { label: 'Preparing', progress: 20, ms: 300 },
-                { label: `Backing up ${type}`, progress: 60, ms: 1200 },
-                { label: 'Compressing archive', progress: 90, ms: 400 }
-              ];
-
-          for (const stage of stages) {
-            await delay(stage.ms);
-            jobQueue.updateJob(job.id, { progress: stage.progress });
-          }
-
-          // Simulate backup size (random between 50MB and 2GB for realism)
-          const sizeMb = Math.floor(Math.random() * 1950 + 50);
-          const sizeBytes = sizeMb * 1024 * 1024;
+          const result = await backupService.createBackup({
+            type,
+            name: backupName,
+            onProgress: (progress) => jobQueue.updateJob(job.id, { progress })
+          });
 
           await database('backups').where('id', backupId).update({
             status: 'completed',
-            size_bytes: sizeBytes,
+            path: result.path,
+            size_bytes: result.size,
             completed_at: new Date(),
             updated_at: new Date()
           });
 
-          jobQueue.updateJob(job.id, { status: 'completed', progress: 100, result: { backupId, size: sizeBytes } });
-          logger.info(`Backup ${backupName} completed (${sizeMb}MB)`);
+          jobQueue.updateJob(job.id, { status: 'completed', progress: 100, result: { backupId, size: result.size } });
+          logger.info(`Backup ${backupName} completed (${result.size} bytes) by ${req.user.username}`);
         } catch (err) {
           await database('backups').where('id', backupId).update({
             status: 'failed',
@@ -117,7 +102,8 @@ router.post('/', requirePermission('backups:write'),
   }
 );
 
-// Restore backup
+// Restore backup (real: decompresses/extracts the archive and restores
+// whichever of database/emails/files it contains)
 router.post('/:id/restore', requirePermission('backups:write'),
   [param('id').isInt()],
   async (req, res) => {
@@ -127,23 +113,30 @@ router.post('/:id/restore', requirePermission('backups:write'),
       if (req.user.role !== 'admin' && backup.user_id !== req.user.id)
         return res.status(403).json({ success: false, message: 'Access denied' });
       if (backup.status !== 'completed') return res.status(400).json({ success: false, message: 'Can only restore completed backups' });
+      if (!backup.path) return res.status(400).json({ success: false, message: 'Backup has no archive on disk' });
+
+      try {
+        await fs.access(backup.path);
+      } catch {
+        return res.status(404).json({ success: false, message: 'Backup archive file is missing from disk' });
+      }
 
       const job = jobQueue.createJob('backup_restore', `Restore ${backup.name}`, req.user.id);
 
       res.status(202).json({ success: true, message: 'Restore started', jobId: job.id });
 
       setImmediate(async () => {
-        jobQueue.updateJob(job.id, { status: 'running', progress: 10 });
+        jobQueue.updateJob(job.id, { status: 'running', progress: 0 });
         try {
-          await delay(800);
-          jobQueue.updateJob(job.id, { progress: 40 });
-          await delay(1200);
-          jobQueue.updateJob(job.id, { progress: 80 });
-          await delay(600);
+          await backupService.restoreBackup({
+            archivePath: backup.path,
+            onProgress: (progress) => jobQueue.updateJob(job.id, { progress })
+          });
           jobQueue.updateJob(job.id, { status: 'completed', progress: 100 });
           logger.info(`Backup ${backup.name} restored by ${req.user.username}`);
         } catch (err) {
           jobQueue.updateJob(job.id, { status: 'failed', error: err.message });
+          logger.error(`Restore failed for backup ${backup.name}:`, err);
         }
       });
     } catch (err) {
@@ -163,6 +156,11 @@ router.delete('/:id', requirePermission('backups:write'),
       if (req.user.role !== 'admin' && backup.user_id !== req.user.id)
         return res.status(403).json({ success: false, message: 'Access denied' });
 
+      if (backup.path) {
+        await fs.unlink(backup.path).catch((err) =>
+          logger.warn(`Could not remove backup archive ${backup.path}:`, err.message));
+      }
+
       await database('backups').where('id', req.params.id).delete();
       logger.info(`Backup ${backup.name} deleted by ${req.user.username}`);
       res.json({ success: true, message: 'Backup deleted' });
@@ -174,6 +172,8 @@ router.delete('/:id', requirePermission('backups:write'),
 );
 
 // --- Schedules ---
+// Actually executed by src/jobs/backupScheduler.js, which polls for due,
+// active schedules once a minute and runs a real backup for each.
 
 router.get('/schedules', requirePermission('backups:read'), async (req, res) => {
   try {
@@ -200,7 +200,7 @@ router.post('/schedules', requirePermission('backups:write'),
       if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
       const { type, frequency, retention_days = 7, destination = 'local' } = req.body;
-      const next_run = computeNextRun(frequency);
+      const next_run = backupService.computeNextRun(frequency);
 
       const [id] = await database('backup_schedules').insert({
         user_id: req.user.id,
@@ -237,7 +237,7 @@ router.put('/schedules/:id', requirePermission('backups:write'),
       if (req.body.retention_days !== undefined) updates.retention_days = req.body.retention_days;
       if (req.body.frequency !== undefined) {
         updates.frequency = req.body.frequency;
-        updates.next_run = computeNextRun(req.body.frequency);
+        updates.next_run = backupService.computeNextRun(req.body.frequency);
       }
 
       await database('backup_schedules').where('id', req.params.id).update(updates);
@@ -266,18 +266,5 @@ router.delete('/schedules/:id', requirePermission('backups:write'),
     }
   }
 );
-
-function computeNextRun(frequency) {
-  const d = new Date();
-  if (frequency === 'daily') d.setDate(d.getDate() + 1);
-  else if (frequency === 'weekly') d.setDate(d.getDate() + 7);
-  else if (frequency === 'monthly') d.setMonth(d.getMonth() + 1);
-  d.setHours(2, 0, 0, 0); // Run at 2 AM
-  return d;
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 module.exports = router;
