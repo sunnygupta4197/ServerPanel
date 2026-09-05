@@ -468,7 +468,8 @@ class ServerPanelApp {
       domains: 'Domain Management',
       ssl: 'SSL / TLS Certificates',
       email: 'Email Management',
-      backups: 'Backup & Restore'
+      backups: 'Backup & Restore',
+      applications: 'Applications'
     };
     return titles[page] || 'Unknown Page';
   }
@@ -507,6 +508,8 @@ class ServerPanelApp {
         return this.getEmailPageContent();
       case 'backups':
         return this.getBackupsPageContent();
+      case 'applications':
+        return this.getApplicationsPageContent();
       default:
         return `
           <div class="card" style="margin-top: 2rem;">
@@ -557,6 +560,9 @@ class ServerPanelApp {
         break;
       case 'backups':
         this.loadBackupsData();
+        break;
+      case 'applications':
+        this.loadApplicationsData();
         break;
     }
   }
@@ -2764,6 +2770,7 @@ class ServerPanelApp {
     this._refreshAppearanceUI();
     const accentLabel = document.getElementById('accent-hex-label');
     if (accentLabel) accentLabel.textContent = this.accent;
+    this.renderTwoFactorSection();
 
     try {
       const response = await fetch('/api/settings');
@@ -3152,6 +3159,12 @@ class ServerPanelApp {
             <div style="display:flex;justify-content:flex-end;margin-top:0.5rem;">
               <button class="btn btn-primary" onclick="app.updatePassword()"><i class="fas fa-key"></i> Update Password</button>
             </div>
+
+            <div style="margin:1.5rem 0 1rem;border-top:1px solid var(--border);padding-top:1.25rem;">
+              <h3 style="margin:0 0 0.25rem;font-size:0.95rem;">Two-Factor Authentication</h3>
+              <p style="margin:0 0 0.75rem;font-size:0.8125rem;color:var(--text-secondary);">Require an authenticator app code at login</p>
+              <div id="settings-2fa-container"></div>
+            </div>
           </div><!-- /security -->
 
           <!-- ── Notifications ───────────────────────────────── -->
@@ -3188,6 +3201,21 @@ class ServerPanelApp {
 
         </div><!-- /panels -->
       </div><!-- /grid -->
+
+      <!-- Disable 2FA Modal -->
+      <div id="disable-2fa-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:380px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">Disable Two-Factor Authentication</h3>
+          <div class="form-group" style="margin-bottom:1.5rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Confirm your password</label>
+            <input id="disable-2fa-password" type="password" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+            <button class="btn" onclick="app.hideModal('disable-2fa-modal')">Cancel</button>
+            <button class="btn btn-primary" style="background:var(--danger);border-color:var(--danger);" onclick="app.submitDisableTwoFactor()"><i class="fas fa-shield-alt"></i> Disable</button>
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -4329,6 +4357,104 @@ class ServerPanelApp {
     }
   }
 
+  renderTwoFactorSection() {
+    const container = document.getElementById('settings-2fa-container');
+    if (!container) return;
+
+    if (this.currentUser?.two_factor_enabled) {
+      container.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <span class="badge badge-success"><i class="fas fa-check-circle" style="margin-right:0.3rem;"></i>Enabled</span>
+          <button class="btn btn-sm" onclick="app.showDisableTwoFactorModal()">Disable</button>
+        </div>`;
+    } else {
+      container.innerHTML = `
+        <button class="btn btn-primary" onclick="app.startTwoFactorSetup()"><i class="fas fa-qrcode"></i> Enable Two-Factor Authentication</button>
+        <div id="settings-2fa-setup" style="display:none;margin-top:1rem;"></div>`;
+    }
+  }
+
+  async startTwoFactorSetup() {
+    try {
+      const res = await fetch('/api/auth/2fa/setup', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) return this.showToast(data.message || 'Failed to start 2FA setup', 'error');
+
+      const setupEl = document.getElementById('settings-2fa-setup');
+      setupEl.style.display = '';
+      setupEl.innerHTML = `
+        <div style="display:flex;gap:1.25rem;align-items:flex-start;flex-wrap:wrap;">
+          <img src="${data.data.qrCode}" alt="2FA QR code" style="width:160px;height:160px;border-radius:8px;background:#fff;padding:8px;">
+          <div style="flex:1;min-width:200px;">
+            <p style="font-size:0.8125rem;color:var(--text-secondary);margin:0 0 0.5rem;">Scan with your authenticator app, or enter this key manually:</p>
+            <code style="display:block;padding:0.5rem;background:var(--dark-light);border-radius:4px;font-size:0.75rem;margin-bottom:0.75rem;word-break:break-all;">${data.data.secret}</code>
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;font-size:0.8125rem;">Enter the 6-digit code to confirm</label>
+            <div style="display:flex;gap:0.5rem;">
+              <input id="settings-2fa-code" type="text" maxlength="6" inputmode="numeric" placeholder="000000" class="form-control" style="width:120px;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+              <button class="btn btn-primary" onclick="app.confirmTwoFactorSetup()"><i class="fas fa-check"></i> Confirm</button>
+            </div>
+          </div>
+        </div>`;
+    } catch (error) {
+      console.error('Error starting 2FA setup:', error);
+      this.showToast('Failed to start 2FA setup', 'error');
+    }
+  }
+
+  async confirmTwoFactorSetup() {
+    const code = document.getElementById('settings-2fa-code').value.trim();
+    if (!code) return this.showToast('Enter the 6-digit code', 'error');
+
+    try {
+      const res = await fetch('/api/auth/2fa/enable', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.showToast('Two-factor authentication enabled', 'success');
+        if (this.currentUser) this.currentUser.two_factor_enabled = true;
+        this.renderTwoFactorSection();
+      } else {
+        this.showToast(data.message || 'Invalid code', 'error');
+      }
+    } catch (error) {
+      console.error('Error confirming 2FA setup:', error);
+      this.showToast('Failed to confirm 2FA setup', 'error');
+    }
+  }
+
+  showDisableTwoFactorModal() {
+    document.getElementById('disable-2fa-password').value = '';
+    this.showModal('disable-2fa-modal');
+  }
+
+  async submitDisableTwoFactor() {
+    const password = document.getElementById('disable-2fa-password').value;
+    if (!password) return this.showToast('Enter your password', 'error');
+
+    try {
+      const res = await fetch('/api/auth/2fa/disable', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('disable-2fa-modal');
+        this.showToast('Two-factor authentication disabled', 'success');
+        if (this.currentUser) this.currentUser.two_factor_enabled = false;
+        this.renderTwoFactorSection();
+      } else {
+        this.showToast(data.message || 'Failed to disable two-factor authentication', 'error');
+      }
+    } catch (error) {
+      console.error('Error disabling 2FA:', error);
+      this.showToast('Failed to disable two-factor authentication', 'error');
+    }
+  }
+
   showSettingsSection(section, linkEl) {
     const panels = ['appearance', 'general', 'security', 'notifications'];
     panels.forEach(id => {
@@ -5201,6 +5327,193 @@ class ServerPanelApp {
       if (res.ok) { this.showToast('Schedule deleted', 'success'); this.loadBackupSchedules(); }
       else this.showToast('Failed to delete schedule', 'error');
     } catch (err) { this.showToast('Failed to delete schedule', 'error'); }
+  }
+
+  // =====================================================
+  // APPLICATIONS PAGE
+  // =====================================================
+
+  getApplicationsPageContent() {
+    return `
+      <div style="margin-top:2rem;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem;">
+          <div>
+            <h2 style="color:var(--text-primary);margin:0;">Application Catalog</h2>
+            <p style="color:var(--text-secondary);margin:0.25rem 0 0;">One-click install popular server applications</p>
+          </div>
+          <input type="text" placeholder="Search…" style="width:200px;" oninput="app.filterAppCatalog(this.value)">
+        </div>
+        <div id="app-catalog-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:1rem;margin-bottom:2rem;">
+          <div style="grid-column:1/-1;text-align:center;padding:2rem;color:var(--text-secondary);"><div class="loading" style="margin:0 auto 0.75rem;"></div><p>Loading catalog...</p></div>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+          <h3 style="color:var(--text-primary);margin:0;">Installed Applications</h3>
+          <button class="btn btn-sm" onclick="app.loadApplicationsData()"><i class="fas fa-sync"></i> Refresh</button>
+        </div>
+        <div id="app-installed-list" class="card" style="padding:0;overflow:hidden;">
+          <div style="text-align:center;padding:2rem;color:var(--text-secondary);"><div class="loading" style="margin:0 auto 0.75rem;"></div><p>Loading...</p></div>
+        </div>
+      </div>
+
+      <!-- Install App Modal -->
+      <div id="install-app-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:440px;max-width:95vw;">
+          <h3 id="install-app-title" style="color:var(--text-primary);margin-bottom:1.25rem;">Install Application</h3>
+          <input id="install-app-id" type="hidden">
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Domain</label>
+            <input id="install-app-domain" type="text" placeholder="example.com" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+          </div>
+          <div class="form-group" style="margin-bottom:1.5rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Install Path (optional)</label>
+            <input id="install-app-path" type="text" placeholder="Defaults to the web root" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+            <button class="btn" onclick="app.hideModal('install-app-modal')">Cancel</button>
+            <button class="btn btn-primary" onclick="app.submitInstallApp()"><i class="fas fa-download"></i> Install</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async loadApplicationsData() {
+    await Promise.all([this.loadAppCatalog(), this.loadInstalledApps()]);
+  }
+
+  async loadAppCatalog() {
+    try {
+      const res = await fetch('/api/applications/catalog');
+      const data = await res.json();
+      const grid = document.getElementById('app-catalog-grid');
+      if (!grid) return;
+      if (!data.success || !data.data.applications.length) {
+        grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:2rem;color:var(--text-secondary);">No applications in catalog.</div>`;
+        return;
+      }
+      this._appCatalog = data.data.applications;
+      this._renderAppCatalog(this._appCatalog);
+    } catch (err) {
+      console.error('Error loading app catalog:', err);
+      this.showToast('Failed to load application catalog', 'error');
+    }
+  }
+
+  _renderAppCatalog(apps) {
+    const grid = document.getElementById('app-catalog-grid');
+    if (!grid) return;
+    if (!apps.length) {
+      grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:2rem;color:var(--text-secondary);">No matching applications.</div>`;
+      return;
+    }
+    grid.innerHTML = apps.map(app => {
+      const busy = app.installationStatus === 'installing' || app.installationStatus === 'uninstalling';
+      let actionBtn;
+      if (app.isInstalled) {
+        actionBtn = `<button class="btn btn-sm" style="width:100%;color:var(--danger);" onclick="app.uninstallApp(${app.installationId}, '${this.escapeHtml(app.name)}')"><i class="fas fa-trash"></i> Uninstall</button>`;
+      } else if (busy) {
+        actionBtn = `<button class="btn btn-sm" style="width:100%;" disabled><i class="fas fa-spinner fa-spin"></i> ${app.installationStatus}...</button>`;
+      } else {
+        actionBtn = `<button class="btn btn-primary btn-sm" style="width:100%;" onclick="app.showInstallAppModal('${app.id}', '${this.escapeHtml(app.name)}')"><i class="fas fa-download"></i> Install</button>`;
+      }
+      return `
+        <div class="card" style="text-align:center;padding:1.25rem;">
+          <i class="fas fa-cube" style="font-size:1.75rem;color:var(--primary);margin-bottom:0.6rem;display:block;"></i>
+          <div style="font-weight:600;color:var(--text-primary);margin-bottom:0.2rem;">${this.escapeHtml(app.name)}</div>
+          <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;margin-bottom:0.5rem;">${this.escapeHtml(app.category)} · ${this.escapeHtml(app.size || '')}</div>
+          <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:0.85rem;min-height:2.2em;">${this.escapeHtml(app.description || '')}</div>
+          ${actionBtn}
+        </div>`;
+    }).join('');
+  }
+
+  filterAppCatalog(query) {
+    if (!this._appCatalog) return;
+    const q = query.toLowerCase();
+    const filtered = this._appCatalog.filter(a =>
+      a.name.toLowerCase().includes(q) || (a.description || '').toLowerCase().includes(q) || (a.tags || []).some(t => t.toLowerCase().includes(q))
+    );
+    this._renderAppCatalog(filtered);
+  }
+
+  async loadInstalledApps() {
+    try {
+      const res = await fetch('/api/applications/installed');
+      const data = await res.json();
+      const el = document.getElementById('app-installed-list');
+      if (!el) return;
+      if (!data.success || !data.data.length) {
+        el.innerHTML = `<div style="text-align:center;padding:2.5rem;color:var(--text-secondary);"><i class="fas fa-th-large" style="font-size:2.5rem;opacity:0.3;margin-bottom:0.75rem;display:block;"></i><p>No applications installed yet.</p></div>`;
+        return;
+      }
+      const statusColor = { installed:'var(--success)', installing:'var(--primary)', failed:'var(--danger)', uninstalling:'var(--warning)', updating:'var(--primary)' };
+      el.innerHTML = data.data.map(a => `
+        <div style="display:flex;align-items:center;gap:1rem;padding:0.875rem 1.25rem;border-bottom:1px solid var(--border);">
+          <i class="fas fa-cube" style="color:var(--primary);width:16px;flex-shrink:0;"></i>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:0.875rem;font-weight:500;color:var(--text-primary);">${this.escapeHtml(a.name)}</div>
+            <div style="font-size:0.75rem;color:var(--text-secondary);">${this.escapeHtml(a.domain || '')} · ${this.escapeHtml(a.install_path || '')}</div>
+          </div>
+          <span style="flex-shrink:0;font-size:0.75rem;font-weight:600;color:${statusColor[a.status]||'var(--text-secondary)'};">${a.status}${a.progress != null && a.status !== 'installed' ? ` ${a.progress}%` : ''}</span>
+          <div style="display:flex;gap:0.35rem;flex-shrink:0;">
+            ${a.status === 'installed' ? `<button class="btn btn-sm" onclick="app.uninstallApp(${a.installationId}, '${this.escapeHtml(a.name)}')" title="Uninstall" style="color:var(--danger);"><i class="fas fa-trash"></i></button>` : ''}
+          </div>
+        </div>`).join('');
+    } catch (err) {
+      console.error('Error loading installed apps:', err);
+      this.showToast('Failed to load installed applications', 'error');
+    }
+  }
+
+  showInstallAppModal(appId, appName) {
+    document.getElementById('install-app-title').textContent = `Install ${appName}`;
+    document.getElementById('install-app-id').value = appId;
+    document.getElementById('install-app-domain').value = '';
+    document.getElementById('install-app-path').value = '';
+    this.showModal('install-app-modal');
+  }
+
+  async submitInstallApp() {
+    const appId = document.getElementById('install-app-id').value;
+    const domain = document.getElementById('install-app-domain').value.trim();
+    const installPath = document.getElementById('install-app-path').value.trim();
+
+    try {
+      const res = await fetch(`/api/applications/install/${appId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: domain || undefined, installPath: installPath || undefined })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('install-app-modal');
+        this.showToast(`Installing ${appId}…`, 'info');
+        this.loadApplicationsData();
+      } else {
+        this.showToast(data.message || 'Failed to start installation', 'error');
+      }
+    } catch (err) {
+      console.error('Error installing application:', err);
+      this.showToast('Failed to start installation', 'error');
+    }
+  }
+
+  async uninstallApp(installationId, name) {
+    if (!confirm(`Uninstall ${name}? This removes its files and any provisioned database.`)) return;
+    try {
+      const res = await fetch(`/api/applications/uninstall/${installationId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok) {
+        this.showToast(`Uninstalling ${name}…`, 'info');
+        this.loadApplicationsData();
+      } else {
+        this.showToast(data.message || 'Failed to start uninstall', 'error');
+      }
+    } catch (err) {
+      console.error('Error uninstalling application:', err);
+      this.showToast('Failed to start uninstall', 'error');
+    }
   }
 
   // =====================================================
