@@ -6,6 +6,7 @@ const { requirePermission } = require('../middleware/authMiddleware');
 const database = require('../config/database');
 const logger = require('../config/logger');
 const jobQueue = require('../jobs/jobQueue');
+const acmeService = require('../services/acmeService');
 
 // List all certificates
 router.get('/', requirePermission('ssl:read'), async (req, res) => {
@@ -99,34 +100,36 @@ router.post('/issue', requirePermission('ssl:write'),
         jobId: job.id
       });
 
-      // Background: simulate Let's Encrypt ACME flow
-      // In production, integrate certbot or acme.js here
+      // Background: real ACME HTTP-01 issuance via acmeService. This only
+      // succeeds if `domain` genuinely resolves to this server and port 80
+      // reaches it for /.well-known/acme-challenge/ — Let's Encrypt
+      // validates from the public internet, not from this process.
       setImmediate(async () => {
-        jobQueue.updateJob(job.id, { status: 'running', progress: 10 });
+        jobQueue.updateJob(job.id, { status: 'running', progress: 5 });
         try {
-          // Step 1: Domain validation (ACME challenge)
-          await delay(1000);
-          jobQueue.updateJob(job.id, { progress: 40 });
+          const { certificate, privateKey } = await acmeService.issueCertificate({
+            domain,
+            email: req.user.email,
+            onProgress: (progress) => jobQueue.updateJob(job.id, { progress })
+          });
 
-          // Step 2: Certificate signing
-          await delay(1000);
-          jobQueue.updateJob(job.id, { progress: 70 });
-
-          // Step 3: Store certificate
-          const issued = new Date();
-          const expires = new Date(issued);
-          expires.setDate(expires.getDate() + 90);
+          const x509 = new crypto.X509Certificate(certificate);
+          const issued = new Date(x509.validFrom);
+          const expires = new Date(x509.validTo);
 
           await database('ssl_certificates').where('id', certId).update({
             status: 'active',
+            certificate,
+            private_key: privateKey,
             issued_at: issued,
             expires_at: expires,
             last_renewed_at: issued,
+            error_message: null,
             updated_at: new Date()
           });
 
           jobQueue.updateJob(job.id, { status: 'completed', progress: 100, result: { certId } });
-          logger.info(`SSL certificate issued for ${domain}`);
+          logger.info(`SSL certificate issued for ${domain} (expires ${expires.toISOString()})`);
         } catch (err) {
           await database('ssl_certificates').where('id', certId).update({
             status: 'failed',
@@ -230,18 +233,22 @@ router.post('/:id/renew', requirePermission('ssl:write'),
       res.status(202).json({ success: true, message: 'Certificate renewal started', jobId: job.id });
 
       setImmediate(async () => {
-        jobQueue.updateJob(job.id, { status: 'running', progress: 20 });
+        jobQueue.updateJob(job.id, { status: 'running', progress: 5 });
         try {
-          await delay(2000);
-          jobQueue.updateJob(job.id, { progress: 60 });
-          await delay(1000);
+          const { certificate, privateKey } = await acmeService.issueCertificate({
+            domain: cert.domain,
+            email: req.user.email,
+            onProgress: (progress) => jobQueue.updateJob(job.id, { progress })
+          });
 
-          const renewed = new Date();
-          const expires = new Date(renewed);
-          expires.setDate(expires.getDate() + 90);
+          const x509 = new crypto.X509Certificate(certificate);
+          const renewed = new Date(x509.validFrom);
+          const expires = new Date(x509.validTo);
 
           await database('ssl_certificates').where('id', cert.id).update({
             status: 'active',
+            certificate,
+            private_key: privateKey,
             issued_at: renewed,
             expires_at: expires,
             last_renewed_at: renewed,
@@ -250,9 +257,15 @@ router.post('/:id/renew', requirePermission('ssl:write'),
           });
 
           jobQueue.updateJob(job.id, { status: 'completed', progress: 100 });
-          logger.info(`SSL certificate renewed for ${cert.domain}`);
+          logger.info(`SSL certificate renewed for ${cert.domain} (expires ${expires.toISOString()})`);
         } catch (err) {
+          await database('ssl_certificates').where('id', cert.id).update({
+            status: 'active',
+            error_message: `Renewal failed: ${err.message}`,
+            updated_at: new Date()
+          });
           jobQueue.updateJob(job.id, { status: 'failed', error: err.message });
+          logger.error(`SSL renewal failed for ${cert.domain}:`, err);
         }
       });
     } catch (err) {
@@ -300,10 +313,6 @@ async function resolveOwnedDomain(domainName, req) {
   if (!domainRow) return null;
   if (req.user.role !== 'admin' && domainRow.user_id !== req.user.id) return null;
   return domainRow;
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 module.exports = router;
