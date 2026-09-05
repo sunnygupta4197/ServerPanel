@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { body, param, validationResult } = require('express-validator');
 const { requirePermission } = require('../middleware/authMiddleware');
 const database = require('../config/database');
@@ -167,9 +168,25 @@ router.post('/upload', requirePermission('ssl:write'),
       if (!private_key.includes('-----BEGIN'))
         return res.status(400).json({ success: false, message: 'Invalid private key format (expected PEM)' });
 
-      // Parse expiry from cert (placeholder — real impl would use node-forge or openssl)
-      const expires = new Date();
-      expires.setFullYear(expires.getFullYear() + 1);
+      let x509;
+      try {
+        x509 = new crypto.X509Certificate(certificate);
+      } catch (parseErr) {
+        return res.status(400).json({ success: false, message: `Could not parse certificate: ${parseErr.message}` });
+      }
+
+      if (!x509.checkHost(domain) && !x509.checkHost(`www.${domain}`)) {
+        return res.status(400).json({
+          success: false,
+          message: `Certificate does not cover ${domain} (subject/SAN mismatch)`
+        });
+      }
+
+      const expires = new Date(x509.validTo);
+      if (expires < new Date()) {
+        return res.status(400).json({ success: false, message: `Certificate already expired on ${expires.toISOString()}` });
+      }
+      const issuedAt = new Date(x509.validFrom);
 
       const [certId] = await database('ssl_certificates').insert({
         domain,
@@ -181,7 +198,7 @@ router.post('/upload', requirePermission('ssl:write'),
         private_key,
         chain: chain || null,
         auto_renew: false,
-        issued_at: new Date(),
+        issued_at: issuedAt,
         expires_at: expires,
         created_at: new Date(),
         updated_at: new Date()
