@@ -43,6 +43,7 @@ const applicationRoutes = require('./routes/applications');
 const socketHandlers = require('./sockets/socketHandlers');
 const jobQueue = require('./jobs/jobQueue');
 const backupScheduler = require('./jobs/backupScheduler');
+const acmeService = require('./services/acmeService');
 
 class ServerPanelApp {
   constructor() {
@@ -175,6 +176,15 @@ class ServerPanelApp {
         uptime: process.uptime(),
         version: process.env.npm_package_version || '1.0.0'
       });
+    });
+
+    // ACME HTTP-01 challenge response — must be publicly reachable on port 80
+    // for the domain being validated, unauthenticated, and outside the
+    // /api/ rate limiter (Let's Encrypt may probe it more than once).
+    this.app.get('/.well-known/acme-challenge/:token', (req, res) => {
+      const keyAuthorization = acmeService.getChallengeResponse(req.params.token);
+      if (!keyAuthorization) return res.status(404).send('Not found');
+      res.type('text/plain').send(keyAuthorization);
     });
 
     // API routes
