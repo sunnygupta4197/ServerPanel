@@ -2292,6 +2292,38 @@ class ServerPanelApp {
             </div>
           </div>
         </div>
+
+        <div id="configure-alerts-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+          <div class="card" style="width:460px;max-width:95vw;">
+            <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">Configure Alerts</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">
+              <div>
+                <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">CPU Threshold (%)</label>
+                <input id="alert-cpu-threshold" type="number" min="0" max="100" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+              </div>
+              <div>
+                <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Memory Threshold (%)</label>
+                <input id="alert-memory-threshold" type="number" min="0" max="100" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+              </div>
+              <div>
+                <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Disk Threshold (%)</label>
+                <input id="alert-disk-threshold" type="number" min="0" max="100" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+              </div>
+              <div>
+                <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Load Threshold</label>
+                <input id="alert-load-threshold" type="number" min="0" step="0.1" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+              </div>
+            </div>
+            <div class="form-group" style="margin-bottom:1.5rem;display:flex;align-items:center;gap:0.6rem;">
+              <input id="alert-alerts-enabled" type="checkbox" style="width:auto;">
+              <label style="color:var(--text-secondary);margin:0;">Alerts enabled</label>
+            </div>
+            <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+              <button class="btn" onclick="app.hideModal('configure-alerts-modal')">Cancel</button>
+              <button class="btn btn-primary" onclick="app.saveAlertConfig()"><i class="fas fa-check"></i> Save</button>
+            </div>
+          </div>
+        </div>
       </div>
     `;
   }
@@ -2849,6 +2881,80 @@ class ServerPanelApp {
               <tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-muted);"><i class="fas fa-spinner fa-spin" style="margin-right:0.5rem;"></i>Loading users…</td></tr>
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <!-- Add User Modal -->
+      <div id="add-user-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:420px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">Add User</h3>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Username</label>
+            <input id="new-user-username" type="text" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Email</label>
+            <input id="new-user-email" type="email" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Password</label>
+            <input id="new-user-password" type="password" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+          </div>
+          <div class="form-group" style="margin-bottom:1.5rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Role</label>
+            <select id="new-user-role" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+              <option value="user">User</option>
+              <option value="viewer">Viewer</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+            <button class="btn" onclick="app.hideModal('add-user-modal')">Cancel</button>
+            <button class="btn btn-primary" onclick="app.submitCreateUser()"><i class="fas fa-plus"></i> Create</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Edit User Modal -->
+      <div id="edit-user-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:420px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">Edit User</h3>
+          <input id="edit-user-id" type="hidden">
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Username</label>
+            <input id="edit-user-username" type="text" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Email</label>
+            <input id="edit-user-email" type="email" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Role</label>
+            <select id="edit-user-role" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
+              <option value="user">User</option>
+              <option value="viewer">Viewer</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom:1.5rem;display:flex;align-items:center;gap:0.6rem;">
+            <input id="edit-user-active" type="checkbox" style="width:auto;">
+            <label style="color:var(--text-secondary);margin:0;">Active</label>
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+            <button class="btn" onclick="app.hideModal('edit-user-modal')">Cancel</button>
+            <button class="btn btn-primary" onclick="app.submitEditUser()"><i class="fas fa-check"></i> Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- View User Modal -->
+      <div id="view-user-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:460px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">User Profile</h3>
+          <div id="view-user-content"></div>
+          <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
+            <button class="btn" onclick="app.hideModal('view-user-modal')">Close</button>
+          </div>
         </div>
       </div>
     `;
@@ -3625,18 +3731,6 @@ class ServerPanelApp {
     });
   }
 
-  addService() {
-    this.showToast('Add service functionality coming soon', 'info');
-  }
-
-  configureService(serviceName) {
-    this.showToast(`Configure ${serviceName} functionality coming soon`, 'info');
-  }
-
-  fixService(serviceName) {
-    this.showToast(`Fix ${serviceName} functionality coming soon`, 'info');
-  }
-
   // File manager placeholder methods
   openFile(filename) {
     this.editFile(filename);
@@ -3880,7 +3974,6 @@ class ServerPanelApp {
     this.showToast(`User view: ${view}`, 'info');
   }
 
-  // User management placeholder methods
   updateUsersDisplay(users) {
     const tbody = document.getElementById('users-tbody');
     if (!tbody) return;
@@ -3888,11 +3981,13 @@ class ServerPanelApp {
       tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-muted);">No users found</td></tr>`;
       return;
     }
+    const selfId = this.currentUser?.id;
     tbody.innerHTML = users.map(u => {
       const initials = (u.username || '?').slice(0,2).toUpperCase();
       const active   = u.is_active ? `<span class="badge badge-success">Active</span>` : `<span class="badge badge-muted">Inactive</span>`;
       const roleCls  = u.role === 'admin' ? 'badge-danger' : u.role === 'viewer' ? 'badge-muted' : 'badge-info';
       const lastLogin = u.last_login ? new Date(u.last_login).toLocaleDateString() : '—';
+      const isSelf = selfId === u.id;
       return `
         <tr>
           <td>
@@ -3909,7 +4004,10 @@ class ServerPanelApp {
           <td class="mono" style="font-size:0.75rem;color:var(--text-muted);">${lastLogin}</td>
           <td>
             <div style="display:flex;gap:0.25rem;">
+              <button class="btn btn-icon btn-sm" title="View" onclick="app.viewUserProfile(${u.id})"><i class="fas fa-eye"></i></button>
               <button class="btn btn-icon btn-sm" title="Edit" onclick="app.editUser(${u.id})"><i class="fas fa-pencil-alt"></i></button>
+              <button class="btn btn-icon btn-sm" title="${u.is_active ? 'Deactivate' : 'Activate'}" ${isSelf ? 'disabled' : ''} onclick="app.toggleUserStatus(${u.id})"><i class="fas fa-${u.is_active ? 'ban' : 'check'}"></i></button>
+              <button class="btn btn-icon btn-sm" title="Delete" ${isSelf ? 'disabled' : ''} style="${isSelf ? '' : 'color:var(--danger);'}" onclick="app.deleteUser(${u.id}, '${this.escapeHtml(u.username)}')"><i class="fas fa-trash"></i></button>
             </div>
           </td>
         </tr>`;
@@ -3932,74 +4030,228 @@ class ServerPanelApp {
     });
   }
 
-  inviteUser() {
-    this.showToast('Invite user functionality coming soon', 'info');
-  }
-
   createUser() {
-    this.showToast('Create user functionality coming soon', 'info');
+    document.getElementById('new-user-username').value = '';
+    document.getElementById('new-user-email').value = '';
+    document.getElementById('new-user-password').value = '';
+    document.getElementById('new-user-role').value = 'user';
+    this.showModal('add-user-modal');
   }
 
-  editUser(userId) {
-    this.showToast(`Edit user ${userId} functionality coming soon`, 'info');
+  async submitCreateUser() {
+    const username = document.getElementById('new-user-username').value.trim();
+    const email = document.getElementById('new-user-email').value.trim();
+    const password = document.getElementById('new-user-password').value;
+    const role = document.getElementById('new-user-role').value;
+
+    if (!username || !email || !password) {
+      return this.showToast('Username, email, and password are required', 'error');
+    }
+
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, email, password, role })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('add-user-modal');
+        this.showToast(`User ${username} created`, 'success');
+        this.loadUsersData();
+      } else {
+        this.showToast(data.message || data.errors?.[0]?.msg || 'Failed to create user', 'error');
+      }
+    } catch (error) {
+      console.error('Error creating user:', error);
+      this.showToast('Failed to create user', 'error');
+    }
   }
 
-  viewUserProfile(userId) {
-    this.showToast(`View profile ${userId} functionality coming soon`, 'info');
+  async editUser(userId) {
+    try {
+      const res = await fetch(`/api/users/${userId}`);
+      const data = await res.json();
+      if (!res.ok) return this.showToast(data.message || 'Failed to load user', 'error');
+
+      const u = data.data.user;
+      document.getElementById('edit-user-id').value = u.id;
+      document.getElementById('edit-user-username').value = u.username;
+      document.getElementById('edit-user-email').value = u.email;
+      document.getElementById('edit-user-role').value = u.role;
+      document.getElementById('edit-user-active').checked = !!u.is_active;
+      this.showModal('edit-user-modal');
+    } catch (error) {
+      console.error('Error loading user:', error);
+      this.showToast('Failed to load user', 'error');
+    }
   }
 
-  messageUser(userId) {
-    this.showToast(`Message user ${userId} functionality coming soon`, 'info');
+  async submitEditUser() {
+    const id = document.getElementById('edit-user-id').value;
+    const username = document.getElementById('edit-user-username').value.trim();
+    const email = document.getElementById('edit-user-email').value.trim();
+    const role = document.getElementById('edit-user-role').value;
+    const is_active = document.getElementById('edit-user-active').checked;
+
+    try {
+      const res = await fetch(`/api/users/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, email, role, is_active })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('edit-user-modal');
+        this.showToast('User updated', 'success');
+        this.loadUsersData();
+      } else {
+        this.showToast(data.message || data.errors?.[0]?.msg || 'Failed to update user', 'error');
+      }
+    } catch (error) {
+      console.error('Error updating user:', error);
+      this.showToast('Failed to update user', 'error');
+    }
   }
 
-  approveUser(userId) {
-    this.showToast(`Approve user ${userId} functionality coming soon`, 'info');
+  async viewUserProfile(userId) {
+    try {
+      const res = await fetch(`/api/users/${userId}`);
+      const data = await res.json();
+      if (!res.ok) return this.showToast(data.message || 'Failed to load user', 'error');
+
+      const { user, recentActivity } = data.data;
+      const activityHtml = (recentActivity || []).length
+        ? recentActivity.map(a => `<div style="padding:0.5rem 0;border-bottom:1px solid var(--border);font-size:0.8rem;">
+            <span style="color:var(--text-primary);">${this.escapeHtml(a.action)}</span>
+            <span style="color:var(--text-muted);float:right;">${new Date(a.performed_at).toLocaleString()}</span>
+          </div>`).join('')
+        : `<div style="color:var(--text-muted);font-size:0.8rem;padding:0.5rem 0;">No recent activity</div>`;
+
+      document.getElementById('view-user-content').innerHTML = `
+        <div style="margin-bottom:1rem;">
+          <div style="font-weight:600;color:var(--text-primary);font-size:1rem;">${this.escapeHtml(user.username)}</div>
+          <div style="color:var(--text-muted);font-size:0.8125rem;">${this.escapeHtml(user.email)}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem;font-size:0.8125rem;">
+          <div><span style="color:var(--text-muted);">Role:</span> ${this.escapeHtml(user.role)}</div>
+          <div><span style="color:var(--text-muted);">Status:</span> ${user.is_active ? 'Active' : 'Inactive'}</div>
+          <div><span style="color:var(--text-muted);">Last login:</span> ${user.last_login ? new Date(user.last_login).toLocaleString() : '—'}</div>
+          <div><span style="color:var(--text-muted);">Created:</span> ${new Date(user.created_at).toLocaleString()}</div>
+        </div>
+        <div class="section-label" style="margin-bottom:0.5rem;">Recent Activity</div>
+        ${activityHtml}
+      `;
+      this.showModal('view-user-modal');
+    } catch (error) {
+      console.error('Error loading user profile:', error);
+      this.showToast('Failed to load user profile', 'error');
+    }
   }
 
-  resendInvite(userId) {
-    this.showToast(`Resend invite ${userId} functionality coming soon`, 'info');
+  async toggleUserStatus(userId) {
+    try {
+      const res = await fetch(`/api/users/${userId}/toggle-status`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        this.showToast(data.message, 'success');
+        this.loadUsersData();
+      } else {
+        this.showToast(data.message || 'Failed to change user status', 'error');
+      }
+    } catch (error) {
+      console.error('Error toggling user status:', error);
+      this.showToast('Failed to change user status', 'error');
+    }
   }
 
-  cancelInvite(userId) {
-    this.showToast(`Cancel invite ${userId} functionality coming soon`, 'info');
-  }
-
-  // Database placeholder methods
-  createDatabase() {
-    this.showToast('Create database functionality coming soon', 'info');
-  }
-
-  importDatabase() {
-    this.showToast('Import database functionality coming soon', 'info');
-  }
-
-  openDatabase(dbName) {
-    this.showToast(`Open ${dbName} database functionality coming soon`, 'info');
-  }
-
-  backupAllDatabases() {
-    this.showToast('Backup all databases functionality coming soon', 'info');
+  async deleteUser(userId, username) {
+    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok) {
+        this.showToast(`User ${username} deleted`, 'success');
+        this.loadUsersData();
+      } else {
+        this.showToast(data.message || 'Failed to delete user', 'error');
+      }
+    } catch (error) {
+      console.error('Error deleting user:', error);
+      this.showToast('Failed to delete user', 'error');
+    }
   }
 
   refreshDatabases() {
     this.loadDatabaseData();
   }
 
-  databaseSettings(dbName) {
-    this.showToast(`${dbName} settings functionality coming soon`, 'info');
+  async exportMonitoringData() {
+    try {
+      const res = await fetch('/api/monitoring/metrics?format=json');
+      if (!res.ok) throw new Error('Export request failed');
+      const data = await res.json();
+      const payload = typeof data.data === 'string' ? data.data : JSON.stringify(data.data ?? data, null, 2);
+      const blob = new Blob([payload], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `monitoring-export-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      this.showToast('Monitoring data exported', 'success');
+    } catch (error) {
+      console.error('Error exporting monitoring data:', error);
+      this.showToast('Failed to export monitoring data', 'error');
+    }
   }
 
-  exportMonitoringData() {
-    this.showToast('Export functionality coming soon', 'info');
+  async configureAlerts() {
+    try {
+      const res = await fetch('/api/monitoring/config');
+      const data = await res.json();
+      if (res.ok && data.data) {
+        const t = data.data.thresholds || {};
+        document.getElementById('alert-cpu-threshold').value = t.cpu ?? 80;
+        document.getElementById('alert-memory-threshold').value = t.memory ?? 85;
+        document.getElementById('alert-disk-threshold').value = t.disk ?? 90;
+        document.getElementById('alert-load-threshold').value = t.load ?? 5;
+        document.getElementById('alert-alerts-enabled').checked = !!data.data.alertsEnabled;
+      }
+    } catch (error) {
+      console.error('Error loading alert configuration:', error);
+    }
+    this.showModal('configure-alerts-modal');
   }
 
-  configureAlerts() {
-    this.showToast('Alert configuration coming soon', 'info');
-  }
+  async saveAlertConfig() {
+    const thresholds = {
+      cpu: parseFloat(document.getElementById('alert-cpu-threshold').value),
+      memory: parseFloat(document.getElementById('alert-memory-threshold').value),
+      disk: parseFloat(document.getElementById('alert-disk-threshold').value),
+      load: parseFloat(document.getElementById('alert-load-threshold').value)
+    };
+    const alertsEnabled = document.getElementById('alert-alerts-enabled').checked;
 
-  // Settings placeholder methods
-  exportSettings() {
-    this.showToast('Export settings functionality coming soon', 'info');
+    try {
+      const res = await fetch('/api/monitoring/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thresholds, alertsEnabled })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('configure-alerts-modal');
+        this.showToast('Alert configuration saved', 'success');
+      } else {
+        this.showToast(data.message || 'Failed to save alert configuration', 'error');
+      }
+    } catch (error) {
+      console.error('Error saving alert configuration:', error);
+      this.showToast('Failed to save alert configuration', 'error');
+    }
   }
 
   async saveSettings(section) {
@@ -4095,30 +4347,6 @@ class ServerPanelApp {
     this.applyAccent('#5b6ef8');
     this.applyDensity('default');
     this.showToast('Appearance reset to defaults', 'success');
-  }
-
-  restartSystem() {
-    if (confirm('Are you sure you want to restart the system?')) {
-      this.showToast('System restart functionality coming soon', 'info');
-    }
-  }
-
-  clearCache() {
-    this.showToast('Cache cleared successfully', 'success');
-  }
-
-  runMaintenance() {
-    this.showToast('Maintenance mode functionality coming soon', 'info');
-  }
-
-  resetToDefaults() {
-    if (confirm('Are you sure you want to reset all settings to defaults?')) {
-      this.showToast('Reset to defaults functionality coming soon', 'info');
-    }
-  }
-
-  discardChanges() {
-    this.showToast('Changes discarded', 'info');
   }
 
   // =====================================================
