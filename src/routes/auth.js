@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const speakeasy = require('speakeasy');
+const qrcode = require('qrcode');
 const { body, validationResult } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 const config = require('../config/config');
@@ -504,6 +505,123 @@ router.post('/change-password',
         success: false,
         message: 'Internal server error during password change'
       });
+    }
+  }
+);
+
+// Begin 2FA enrollment: generates a new TOTP secret and returns a QR code
+// to scan. The secret is stored immediately but two_factor_enabled stays
+// false until the user proves they can generate a valid code with it via
+// POST /2fa/enable — otherwise a user who never finishes scanning the QR
+// code would be silently locked out of their own account on next login.
+router.post('/2fa/setup', authenticateToken, async (req, res) => {
+  try {
+    const user = await database('users').where('id', req.user.id).first();
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    if (user.two_factor_enabled) {
+      return res.status(409).json({ success: false, message: 'Two-factor authentication is already enabled' });
+    }
+
+    const secret = speakeasy.generateSecret({
+      length: 20,
+      name: `ServerPanel Pro (${user.username})`
+    });
+
+    await database('users').where('id', req.user.id).update({
+      two_factor_secret: secret.base32,
+      updated_at: new Date()
+    });
+
+    const qrCodeDataUrl = await qrcode.toDataURL(secret.otpauth_url);
+
+    logger.audit('2fa_setup_started', user, 'authentication', { ip: req.ip });
+
+    res.json({
+      success: true,
+      data: { secret: secret.base32, qrCode: qrCodeDataUrl }
+    });
+  } catch (error) {
+    logger.error('2FA setup error:', error);
+    res.status(500).json({ success: false, message: 'Failed to start two-factor setup' });
+  }
+});
+
+// Confirm 2FA enrollment: the user must prove the authenticator app is
+// actually working with the secret from /2fa/setup before it's enforced.
+router.post('/2fa/enable',
+  authenticateToken,
+  [body('code').isLength({ min: 6, max: 6 }).withMessage('Code must be 6 digits')],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      }
+
+      const user = await database('users').where('id', req.user.id).first();
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+      }
+      if (!user.two_factor_secret) {
+        return res.status(400).json({ success: false, message: 'Call /2fa/setup first to generate a secret' });
+      }
+
+      if (!verifyTwoFactorCode(user.two_factor_secret, req.body.code)) {
+        return res.status(401).json({ success: false, message: 'Invalid verification code' });
+      }
+
+      await database('users').where('id', req.user.id).update({
+        two_factor_enabled: true,
+        updated_at: new Date()
+      });
+
+      logger.audit('2fa_enabled', user, 'authentication', { ip: req.ip });
+
+      res.json({ success: true, message: 'Two-factor authentication enabled' });
+    } catch (error) {
+      logger.error('2FA enable error:', error);
+      res.status(500).json({ success: false, message: 'Failed to enable two-factor authentication' });
+    }
+  }
+);
+
+// Disable 2FA — requires the current password so a hijacked-but-not-fully-
+// authenticated session (e.g. a stolen short-lived token) can't turn off
+// the account's second factor on its own.
+router.post('/2fa/disable',
+  authenticateToken,
+  [body('password').isLength({ min: 1 }).withMessage('Password is required')],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      }
+
+      const user = await database('users').where('id', req.user.id).first();
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+      }
+
+      const isValidPassword = await verifyPassword(req.body.password, user.password_hash);
+      if (!isValidPassword) {
+        return res.status(401).json({ success: false, message: 'Incorrect password' });
+      }
+
+      await database('users').where('id', req.user.id).update({
+        two_factor_enabled: false,
+        two_factor_secret: null,
+        updated_at: new Date()
+      });
+
+      logger.audit('2fa_disabled', user, 'authentication', { ip: req.ip });
+
+      res.json({ success: true, message: 'Two-factor authentication disabled' });
+    } catch (error) {
+      logger.error('2FA disable error:', error);
+      res.status(500).json({ success: false, message: 'Failed to disable two-factor authentication' });
     }
   }
 );

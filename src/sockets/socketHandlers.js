@@ -239,6 +239,8 @@ module.exports = (io) => {
     ssl_renew:       'ssl',
     backup_create:   'backups',
     backup_restore:  'backups',
+    app_install:     'applications',
+    app_uninstall:   'applications',
   };
 
   jobQueue.emitter.on('job:done', (job) => {
