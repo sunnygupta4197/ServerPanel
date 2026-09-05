@@ -431,8 +431,7 @@ router.delete('/delete',
       }
 
       // Security: Prevent deletion of critical system paths
-      const criticalPaths = ['/', '/bin', '/boot', '/dev', '/etc', '/lib', '/proc', '/sbin', '/sys', '/usr'];
-      if (criticalPaths.includes(safePath)) {
+      if (isCriticalSystemPath(safePath)) {
         return res.status(403).json({
           success: false,
           message: 'Cannot delete critical system directory'
@@ -942,6 +941,27 @@ function isPathSafe(targetPath) {
   if (/[\\/]\.ssh([\\/]|$)/i.test(resolved)) return false;
 
   return true;
+}
+
+// Unix critical roots resolve and compare exactly as written ('/', '/etc',
+// ...). Windows has no single-character root — the equivalent is a bare
+// drive letter ('C:\\') or a handful of well-known system directories —
+// so the Unix literal-string list alone never matched a Windows-resolved
+// path, silently disabling this check on Windows deployments.
+const WINDOWS_CRITICAL_ROOTS = [
+  'C:\\Windows', 'C:\\Windows\\System32',
+  'C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData'
+];
+const WINDOWS_DRIVE_ROOT_RE = /^[A-Za-z]:\\?$/;
+
+function isCriticalSystemPath(resolvedPath) {
+  if (config.SYSTEM.IS_WINDOWS) {
+    if (WINDOWS_DRIVE_ROOT_RE.test(resolvedPath)) return true;
+    const lower = resolvedPath.toLowerCase();
+    return WINDOWS_CRITICAL_ROOTS.some(p => lower === p.toLowerCase());
+  }
+  const UNIX_CRITICAL_PATHS = ['/', '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64', '/proc', '/root', '/sbin', '/sys', '/usr'];
+  return UNIX_CRITICAL_PATHS.includes(resolvedPath);
 }
 
 async function getFilePermissions(filePath) {
