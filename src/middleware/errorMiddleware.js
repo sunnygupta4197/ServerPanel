@@ -225,30 +225,15 @@ class ServiceUnavailableError extends AppError {
   }
 }
 
-// Error handling for unhandled promise rejections
-process.on('unhandledRejection', (err, promise) => {
-  logger.error('Unhandled Promise Rejection:', {
-    error: err.message,
-    stack: err.stack,
-    promise: promise
-  });
-  
-  // Close server gracefully
-  if (config.NODE_ENV === 'production') {
-    process.exit(1);
-  }
-});
-
-// Error handling for uncaught exceptions
-process.on('uncaughtException', (err) => {
-  logger.error('Uncaught Exception:', {
-    error: err.message,
-    stack: err.stack
-  });
-  
-  // Close server gracefully
-  process.exit(1);
-});
+// process.on('unhandledRejection'/'uncaughtException') used to be
+// registered here too, as a require()-time side effect. Since this module
+// is require()'d by app.js before app.js's own constructor runs and
+// registers its listeners for the same two events (which actually attempt
+// a graceful shutdown — closing the HTTP server and DB pool before
+// exiting), Node called this file's listener first on every crash and it
+// called process.exit(1) immediately, so app.js's graceful path never ran
+// in practice. Removed in favor of a single registration point in
+// src/app.js's initializeErrorHandling()/gracefulShutdown().
 
 // Handle specific operational errors
 const handleOperationalError = (error) => {

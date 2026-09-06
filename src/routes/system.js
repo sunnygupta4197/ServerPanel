@@ -427,16 +427,16 @@ router.post('/power/:action',
       const { action } = req.params;
       const { delay = 60 } = req.body;
 
-      // Execute with no wait
-      if (config.SYSTEM.IS_WINDOWS) {
-        execFile('shutdown', action === 'reboot'
-          ? ['/r', '/t', String(delay)]
-          : ['/s', '/t', String(delay)]);
-      } else {
-        const minutes = `+${Math.ceil(delay / 60)}`;
-        execFile('shutdown', action === 'reboot' ? ['-r', minutes] : ['-h', minutes]);
-      }
-      
+      // Fire-and-forget, but execFile() without a callback still returns a
+      // ChildProcess that emits 'error' if the binary can't even be spawned
+      // (missing from PATH, sandboxed/containerized environment, etc.) —
+      // with no listener that's an uncaught exception that kills the whole
+      // server from a single request, not just this one failing gracefully.
+      const child = config.SYSTEM.IS_WINDOWS
+        ? execFile('shutdown', action === 'reboot' ? ['/r', '/t', String(delay)] : ['/s', '/t', String(delay)])
+        : execFile('shutdown', action === 'reboot' ? ['-r', `+${Math.ceil(delay / 60)}`] : ['-h', `+${Math.ceil(delay / 60)}`]);
+      child.on('error', (err) => logger.error(`Failed to execute system ${action}:`, err));
+
       logger.warn(`System ${action} initiated by ${req.user.username} with ${delay}s delay`);
       
       res.json({
