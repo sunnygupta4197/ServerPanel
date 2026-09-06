@@ -1,6 +1,7 @@
 const { body, param, query, validationResult } = require('express-validator');
 const logger = require('../config/logger');
 const config = require('../config/config');
+const { getAllPermissions } = require('../config/permissions');
 
 // Handle validation errors
 const handleValidationErrors = (req, res, next) => {
@@ -211,28 +212,22 @@ const validationRules = {
     .isInt({ min: 0 })
     .withMessage('File size must be a positive integer'),
   
-  // Permission validation
+  // Permission validation — checks against the same master list routes are
+  // actually gated on (src/config/permissions.js), not a separate
+  // hand-maintained copy that can drift out of sync with it.
   permissions: () => body('permissions')
     .optional()
     .isArray()
     .withMessage('Permissions must be an array')
     .custom((value) => {
-      const validPermissions = [
-        'system:read', 'system:write', 'system:execute',
-        'files:read', 'files:write', 'files:delete',
-        'users:read', 'users:write', 'users:delete',
-        'services:read', 'services:write',
-        'database:read', 'database:write',
-        'monitoring:read', 'monitoring:write',
-        'settings:read', 'settings:write'
-      ];
-      
+      const validPermissions = getAllPermissions();
+
       for (const permission of value) {
         if (!validPermissions.includes(permission)) {
           throw new Error(`Invalid permission: ${permission}`);
         }
       }
-      
+
       return true;
     }),
   

@@ -4,11 +4,24 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { body, param, query, validationResult } = require('express-validator');
 const { requireRole, requirePermission } = require('../middleware/authMiddleware');
-const { validateUserManagement } = require('../middleware/validationMiddleware');
 const logger = require('../config/logger');
 const config = require('../config/config');
 const database = require('../config/database');
-const { getDefaultPermissions } = require('../config/permissions');
+const { getDefaultPermissions, getAllPermissions } = require('../config/permissions');
+
+// Rejects any permission string that isn't one the app actually grants
+// anywhere (src/config/permissions.js) — previously permissions() was
+// validated only as "an array", so a users:write caller could persist
+// arbitrary, non-existent permission strings onto any account.
+const validPermissionsArray = (value) => {
+  if (!Array.isArray(value)) return true; // isArray() check reports this separately
+  for (const permission of value) {
+    if (!getAllPermissions().includes(permission)) {
+      throw new Error(`Invalid permission: ${permission}`);
+    }
+  }
+  return true;
+};
 
 // Get all users
 router.get('/', requirePermission('users:read'), async (req, res) => {
@@ -125,11 +138,11 @@ router.post('/',
   [
     body('username').isLength({ min: 3, max: 50 }).matches(/^[a-zA-Z0-9_.-]+$/),
     body('email').isEmail().normalizeEmail(),
-    body('password').isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH }),
+    body('password').isString().isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH }),
     body('first_name').optional().isLength({ max: 50 }),
     body('last_name').optional().isLength({ max: 50 }),
     body('role').isIn(['admin', 'user', 'viewer']),
-    body('permissions').optional().isArray(),
+    body('permissions').optional().isArray().custom(validPermissionsArray),
     body('is_active').optional().isBoolean()
   ],
   async (req, res) => {
@@ -227,7 +240,7 @@ router.put('/:id',
     body('first_name').optional().isLength({ max: 50 }),
     body('last_name').optional().isLength({ max: 50 }),
     body('role').optional().isIn(['admin', 'user', 'viewer']),
-    body('permissions').optional().isArray(),
+    body('permissions').optional().isArray().custom(validPermissionsArray),
     body('is_active').optional().isBoolean()
   ],
   async (req, res) => {
@@ -402,7 +415,7 @@ router.post('/:id/reset-password',
   requirePermission('users:write'),
   [
     param('id').isInt({ min: 1 }),
-    body('password').isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH })
+    body('password').isString().isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH })
   ],
   async (req, res) => {
     try {
