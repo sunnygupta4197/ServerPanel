@@ -19,6 +19,7 @@ class MonitoringService extends EventEmitter {
     };
     this.alertCooldowns = new Map(); // Prevent alert spam
     this.retentionDays = config.MONITORING.RETENTION_DAYS || 30;
+    this.currentIntervalMs = config.MONITORING.INTERVAL || 30000;
   }
 
   // Start monitoring service
@@ -68,8 +69,6 @@ class MonitoringService extends EventEmitter {
 
   // Start real-time system monitoring
   startRealTimeMonitoring() {
-    const intervalMs = config.MONITORING.INTERVAL || 30000; // 30 seconds default
-
     this.interval = setInterval(async () => {
       try {
         await this.collectSystemMetrics();
@@ -77,9 +76,27 @@ class MonitoringService extends EventEmitter {
         logger.error('Error collecting system metrics:', error);
         this.emit('error', error);
       }
-    }, intervalMs);
+    }, this.currentIntervalMs);
 
-    logger.info(`Real-time monitoring started with ${intervalMs}ms interval`);
+    logger.info(`Real-time monitoring started with ${this.currentIntervalMs}ms interval`);
+  }
+
+  // Live-configurable via Settings > General (monitoring.check_interval).
+  // Restarts the already-running timer with the new interval instead of
+  // only taking effect on next process start.
+  updateInterval(newIntervalMs) {
+    this.currentIntervalMs = newIntervalMs;
+    if (this.isRunning && this.interval) {
+      clearInterval(this.interval);
+      this.startRealTimeMonitoring();
+    }
+    logger.info(`Monitoring interval updated to ${newIntervalMs}ms`);
+  }
+
+  // Live-configurable via Settings > General (logging.retention_days).
+  updateRetentionDays(days) {
+    this.retentionDays = days;
+    logger.info(`Monitoring data retention updated to ${days} days`);
   }
 
   // Collect and store system metrics
@@ -557,7 +574,7 @@ class MonitoringService extends EventEmitter {
   getConfiguration() {
     return {
       isRunning: this.isRunning,
-      interval: config.MONITORING.INTERVAL,
+      interval: this.currentIntervalMs,
       thresholds: this.alertThresholds,
       retentionDays: this.retentionDays,
       alertsEnabled: config.MONITORING.ALERTS_ENABLED

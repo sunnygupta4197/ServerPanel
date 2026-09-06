@@ -5,6 +5,13 @@ const { body, validationResult } = require('express-validator');
 const config = require('../config/config');
 const logger = require('../config/logger');
 const database = require('../config/database');
+const settingsCache = require('../config/settingsCache');
+
+// Live-configurable via Settings > General (security.session_timeout,
+// stored in ms) — falls back to config.JWT_EXPIRE's static default when
+// unset. Shared by generateToken() and every cookie-setting call site in
+// auth.js so the JWT's own expiry and the cookie's maxAge stay consistent.
+const getSessionTimeoutMs = () => settingsCache.getNumber('security.session_timeout', 24 * 60 * 60 * 1000);
 
 // In-memory blacklist cache — O(1) lookup before hitting DB.
 // Tokens blacklisted in a previous process run are caught by the DB fallback.
@@ -63,6 +70,21 @@ const authenticateToken = async (req, res, next) => {
 
     if (!user) {
       return res.status(401).json({ success: false, message: 'Invalid or expired token' });
+    }
+
+    // A JWT issued before the user's last password change is stale — a
+    // hijacked-but-not-yet-noticed token would otherwise stay valid for its
+    // full lifetime even after the very action (change-password/reset)
+    // meant to cut it off. token_blacklist only tracks individual tokens by
+    // literal string with no user_id column, so it can't express "revoke
+    // every session for this user" — comparing the JWT's iat against
+    // password_changed_at achieves the same thing without needing to track
+    // every token ever issued.
+    if (user.password_changed_at) {
+      const passwordChangedAtSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000);
+      if (decoded.iat < passwordChangedAtSec) {
+        return res.status(401).json({ success: false, message: 'Session expired due to a password change. Please log in again.' });
+      }
     }
 
     req.user = {
@@ -248,7 +270,7 @@ const generateToken = (user, twoFactorVerified = false) => {
     },
     config.JWT_SECRET,
     {
-      expiresIn: config.JWT_EXPIRE,
+      expiresIn: Math.floor(getSessionTimeoutMs() / 1000),
       issuer: 'ServerPanel Pro',
       audience: 'ServerPanel Users'
     }
@@ -337,10 +359,15 @@ const recordFailedAttempt = async (username, ip) => {
     const updateData = {
       failed_attempts: failedAttempts
     };
-    
+
+    // Live-configurable via Settings — falls back to the static env-var
+    // defaults when unset.
+    const maxAttempts = settingsCache.getNumber('security.max_login_attempts', config.SECURITY.MAX_LOGIN_ATTEMPTS);
+    const lockoutDuration = settingsCache.getNumber('security.lockout_duration', config.SECURITY.LOCKOUT_TIME);
+
     // Lock account if max attempts reached
-    if (failedAttempts >= config.SECURITY.MAX_LOGIN_ATTEMPTS) {
-      updateData.lockout_until = new Date(Date.now() + config.SECURITY.LOCKOUT_TIME);
+    if (failedAttempts >= maxAttempts) {
+      updateData.lockout_until = new Date(Date.now() + lockoutDuration);
       logger.warn(`Account locked for user ${username} due to ${failedAttempts} failed attempts`);
     }
     
@@ -508,5 +535,6 @@ module.exports = {
   cleanExpiredTokens,
   isAccountLocked,
   recordFailedAttempt,
-  recordSuccessfulLogin
+  recordSuccessfulLogin,
+  getSessionTimeoutMs
 };

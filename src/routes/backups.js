@@ -7,6 +7,7 @@ const database = require('../config/database');
 const logger = require('../config/logger');
 const jobQueue = require('../jobs/jobQueue');
 const backupService = require('../services/backupService');
+const settingsCache = require('../config/settingsCache');
 
 // List backups
 router.get('/', requirePermission('backups:read'), async (req, res) => {
@@ -205,7 +206,8 @@ router.post('/schedules', requirePermission('backups:write'),
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-      const { type, frequency, retention_days = 7, destination = 'local' } = req.body;
+      const { type, frequency, destination = 'local' } = req.body;
+      const retention_days = req.body.retention_days ?? settingsCache.getNumber('backup.retention_days', 7);
       const next_run = backupService.computeNextRun(frequency);
 
       const [id] = await database('backup_schedules').insert({

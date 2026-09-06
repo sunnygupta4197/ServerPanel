@@ -44,6 +44,7 @@ const socketHandlers = require('./sockets/socketHandlers');
 const jobQueue = require('./jobs/jobQueue');
 const backupScheduler = require('./jobs/backupScheduler');
 const acmeService = require('./services/acmeService');
+const settingsCache = require('./config/settingsCache');
 
 class ServerPanelApp {
   constructor() {
@@ -76,11 +77,13 @@ class ServerPanelApp {
     try {
       await database.migrate.latest();
       logger.info('Database migrations completed successfully');
-      
+
       if (process.env.SEED_DB === 'true') {
         await database.seed.run();
         logger.info('Database seeds completed successfully');
       }
+
+      await settingsCache.load();
     } catch (error) {
       logger.error('Database initialization failed:', error);
       throw error;

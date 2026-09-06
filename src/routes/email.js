@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const { requirePermission } = require('../middleware/authMiddleware');
 const database = require('../config/database');
 const logger = require('../config/logger');
+const config = require('../config/config');
 
 // --- Email Accounts ---
 
@@ -56,7 +57,7 @@ router.post('/accounts', requirePermission('email:write'),
       const existing = await database('email_accounts').where({ local_part, domain_id }).first();
       if (existing) return res.status(409).json({ success: false, message: `Email ${address} already exists` });
 
-      const password_hash = await bcrypt.hash(password, 10);
+      const password_hash = await bcrypt.hash(password, config.BCRYPT_ROUNDS);
 
       const [id] = await database('email_accounts').insert({
         user_id: req.user.id,
@@ -96,7 +97,7 @@ router.put('/accounts/:id', requirePermission('email:write'),
         return res.status(403).json({ success: false, message: 'Access denied' });
 
       const updates = { updated_at: new Date() };
-      if (req.body.password) updates.password_hash = await bcrypt.hash(req.body.password, 10);
+      if (req.body.password) updates.password_hash = await bcrypt.hash(req.body.password, config.BCRYPT_ROUNDS);
       if (req.body.quota_mb !== undefined) updates.quota_mb = req.body.quota_mb;
       if (req.body.is_active !== undefined) updates.is_active = req.body.is_active;
 

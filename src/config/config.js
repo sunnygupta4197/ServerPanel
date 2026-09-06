@@ -126,7 +126,12 @@ module.exports = {
   // Security settings
   SECURITY: {
     RATE_LIMIT_WINDOW: process.env.RATE_LIMIT_WINDOW || 15 * 60 * 1000, // 15 minutes
-    RATE_LIMIT_MAX: process.env.RATE_LIMIT_MAX || 100,
+    // 100 was tight enough that the dashboard's own 5s stats-polling loop
+    // alone could exhaust it in ~9 minutes of normal passive use (fixed
+    // separately by not polling while the socket is connected) — raised
+    // for headroom against legitimate multi-tab/active-browsing traffic
+    // from a single admin IP, which this limit is shared across.
+    RATE_LIMIT_MAX: process.env.RATE_LIMIT_MAX || 300,
     PASSWORD_MIN_LENGTH: process.env.PASSWORD_MIN_LENGTH || 8,
     SESSION_TIMEOUT: process.env.SESSION_TIMEOUT || 24 * 60 * 60 * 1000, // 24 hours
     MAX_LOGIN_ATTEMPTS: process.env.MAX_LOGIN_ATTEMPTS || 5,

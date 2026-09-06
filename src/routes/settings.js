@@ -5,10 +5,20 @@ const { requirePermission } = require('../middleware/authMiddleware');
 const database = require('../config/database');
 const logger = require('../config/logger');
 const monitoringService = require('../services/monitoringService');
+const settingsCache = require('../config/settingsCache');
 
 // Known, editable settings keys. PUT rejects anything not listed here, so an
 // authenticated settings:write caller can only ever touch a defined set of
 // app config values, not arbitrary rows in server_configs.
+//
+// email.enabled, notifications.email_alerts, backup.enabled, backup.schedule,
+// and ssl.auto_renew (a global switch, distinct from the real per-certificate
+// auto_renew column ssl_certificates already has) used to be listed here too
+// but had no code path anywhere that read them — nodemailer is an unused
+// dependency (no email-sending code exists at all), and the real backup
+// scheduling feature is the per-row backup_schedules table, not a single
+// global on/off switch. Removed rather than left as settings that silently
+// do nothing when changed.
 const SETTINGS_SCHEMA = {
   'system.name': { type: 'string' },
   'system.domain': { type: 'string' },
@@ -23,19 +33,14 @@ const SETTINGS_SCHEMA = {
   'security.max_login_attempts': { type: 'number', min: 1, max: 20 },
   'security.lockout_duration': { type: 'number', min: 0 },
   'logging.retention_days': { type: 'number', min: 1, max: 3650 },
-  'backup.enabled': { type: 'boolean' },
   'backup.retention_days': { type: 'number', min: 1, max: 3650 },
-  'backup.schedule': { type: 'string' },
-  'email.enabled': { type: 'boolean' },
-  'ssl.auto_renew': { type: 'boolean' },
-  'notifications.email_alerts': { type: 'boolean' },
   'ui.items_per_page': { type: 'number', min: 1, max: 500 },
   'files.max_upload_size': { type: 'number', min: 1 }
 };
 
 // Live-update targets: when one of these keys is saved, immediately apply
 // it to the already-running process instead of only persisting it (it'll
-// still take effect on next boot too, since config reads from the DB).
+// still take effect on next boot too, via settingsCache.load() at startup).
 const MONITORING_THRESHOLD_KEYS = {
   'monitoring.cpu_threshold': 'cpu',
   'monitoring.memory_threshold': 'memory',
@@ -143,6 +148,7 @@ router.put('/',
 
       for (const key of keys) {
         const schema = SETTINGS_SCHEMA[key];
+        const coerced = coerceValue(settings[key], schema.type);
         const serialized = serializeValue(settings[key], schema.type);
         const existing = existingByKey.get(key);
 
@@ -165,9 +171,16 @@ router.put('/',
             updated_at: new Date()
           });
         }
+
+        // Keep the in-memory cache (settingsCache.js) in sync immediately -
+        // it's what authMiddleware.js's session-timeout/lockout logic and
+        // this route's own live-apply block below actually read, since a
+        // fresh DB read on every login/failed-attempt would be wasteful.
+        settingsCache.set(key, coerced);
       }
 
-      // Apply monitoring thresholds to the already-running service immediately
+      // Apply monitoring thresholds/interval/retention to the
+      // already-running service immediately, not just on next boot.
       const newThresholds = {};
       let hasThresholdChange = false;
       for (const [key, shortName] of Object.entries(MONITORING_THRESHOLD_KEYS)) {
@@ -178,6 +191,12 @@ router.put('/',
       }
       if (hasThresholdChange) {
         monitoringService.updateThresholds(newThresholds);
+      }
+      if (Object.prototype.hasOwnProperty.call(settings, 'monitoring.check_interval')) {
+        monitoringService.updateInterval(Number(settings['monitoring.check_interval']));
+      }
+      if (Object.prototype.hasOwnProperty.call(settings, 'logging.retention_days')) {
+        monitoringService.updateRetentionDays(Number(settings['logging.retention_days']));
       }
 
       logger.audit('settings_updated', req.user, 'settings', { keys });

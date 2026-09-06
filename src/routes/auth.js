@@ -22,7 +22,8 @@ const {
   recordSuccessfulLogin,
   validateLogin,
   validateRegistration,
-  loginLimiter
+  loginLimiter,
+  getSessionTimeoutMs
 } = require('../middleware/authMiddleware');
 
 // Rate limiting for authentication endpoints
@@ -44,7 +45,6 @@ router.post('/login',
   async (req, res) => {
     try {
       const { username, password } = req.body;
-      console.log('Login attempt:', { username, passwordLength: password?.length });
       const clientIP = req.ip || req.connection.remoteAddress;
 
       // Check if account is locked
@@ -61,8 +61,6 @@ router.post('/login',
         .where('username', username)
         .where('is_active', true)
         .first();
-
-      console.log('User found:', user ? { id: user.id, username: user.username } : 'null');
 
       if (!user) {
         await recordFailedAttempt(username, clientIP);
@@ -130,7 +128,7 @@ router.post('/login',
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         sameSite: 'strict',
-        maxAge: 24 * 60 * 60 * 1000
+        maxAge: getSessionTimeoutMs()
       });
 
       const userData = {
@@ -231,7 +229,7 @@ router.post('/verify-2fa',
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         sameSite: 'strict',
-        maxAge: 24 * 60 * 60 * 1000
+        maxAge: getSessionTimeoutMs()
       });
 
       res.json({
@@ -354,6 +352,16 @@ router.get('/verify', async (req, res) => {
         success: false,
         message: 'User not found or inactive'
       });
+    }
+
+    // Same check as authenticateToken() in authMiddleware.js — this route
+    // reimplements JWT verification independently rather than using that
+    // shared middleware, so the check has to be duplicated here too.
+    if (user.password_changed_at) {
+      const passwordChangedAtSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000);
+      if (decoded.iat < passwordChangedAtSec) {
+        return res.status(401).json({ success: false, message: 'Session expired due to a password change. Please log in again.' });
+      }
     }
 
     // Update last activity
@@ -667,6 +675,18 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
+    // Refresh explicitly ignores JWT expiration above, but a token issued
+    // before the last password change still needs to be rejected here too
+    // — otherwise /refresh would be a way to keep a revoked session alive
+    // indefinitely, defeating the same check in authenticateToken()/GET
+    // /verify.
+    if (user.password_changed_at) {
+      const passwordChangedAtSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000);
+      if (decoded.iat < passwordChangedAtSec) {
+        return res.status(401).json({ success: false, message: 'Session expired due to a password change. Please log in again.' });
+      }
+    }
+
     // Generate new token preserving 2FA status
     const newToken = generateToken(user, decoded.twoFactorVerified || false);
 
@@ -677,7 +697,7 @@ router.post('/refresh', async (req, res) => {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict',
-      maxAge: 24 * 60 * 60 * 1000
+      maxAge: getSessionTimeoutMs()
     });
 
     res.json({
