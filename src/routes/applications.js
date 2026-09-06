@@ -13,6 +13,24 @@ const logger = require('../config/logger');
 const config = require('../config/config');
 const database = require('../config/database');
 const jobQueue = require('../jobs/jobQueue');
+const { isPathSafe, isCriticalSystemPath } = require('./files');
+
+// Same domain-name shape domains.js validates against — applied here too
+// since `domain` gets interpolated into a live web-server vhost file.
+const DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+const NO_NEWLINES_RE = /^[^\r\n]*$/;
+
+// installPath is used for mkdir, recursive chown/chmod, zip extraction,
+// vhost `root`/`Directory` directives, and — on uninstall — a recursive
+// fs.rm(). Reuses files.js's isPathSafe/isCriticalSystemPath (the same
+// denylist the file manager itself is gated on) instead of leaving this
+// path completely unvalidated, plus rejects newlines so it can't inject
+// extra directives into the generated vhost config.
+function isInstallPathSafe(resolvedPath) {
+  if (!NO_NEWLINES_RE.test(resolvedPath)) return false;
+  if (isCriticalSystemPath(resolvedPath)) return false;
+  return isPathSafe(resolvedPath);
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -272,7 +290,7 @@ router.post('/install/:appId',
   requirePermission('apps:install'),
   [
     param('appId').isString().withMessage('Application ID is required'),
-    body('domain').optional().isString().isLength({ max: 255 }).withMessage('Domain must be a string'),
+    body('domain').optional().isString().matches(DOMAIN_RE).withMessage('Invalid domain name'),
     body('installPath').optional().isString().isLength({ max: 500 }).withMessage('Install path must be a string'),
     body('config').optional().isObject().withMessage('Configuration must be an object')
   ],
@@ -285,6 +303,10 @@ router.post('/install/:appId',
 
       const { appId } = req.params;
       const { domain, installPath, config: appConfig = {} } = req.body;
+
+      if (installPath && !isInstallPathSafe(path.resolve(installPath))) {
+        return res.status(403).json({ success: false, message: 'Install path is not allowed' });
+      }
 
       const app = APPLICATION_CATALOG[appId];
       if (!app) {
@@ -392,6 +414,9 @@ router.get('/install/:installationId/status', requirePermission('apps:read'), as
     if (!installation) {
       return res.status(404).json({ success: false, message: 'Installation not found' });
     }
+    if (!canAccessInstallation(installation, req)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
 
     const logs = await database('installation_logs')
       .where('installation_id', installationId)
@@ -432,6 +457,9 @@ router.delete('/uninstall/:installationId',
       if (!installation) {
         return res.status(404).json({ success: false, message: 'Installation not found' });
       }
+      if (!canAccessInstallation(installation, req)) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+      }
 
       await database('installed_applications').where('id', installationId).update({
         status: 'uninstalling',
@@ -471,6 +499,9 @@ router.post('/update/:installationId', requirePermission('apps:update'), async (
   if (!installation) {
     return res.status(404).json({ success: false, message: 'Installation not found' });
   }
+  if (!canAccessInstallation(installation, req)) {
+    return res.status(403).json({ success: false, message: 'Access denied' });
+  }
   res.status(501).json({
     success: false,
     message: 'In-place application updates are not implemented yet. Uninstall and reinstall the newer version instead.'
@@ -485,6 +516,9 @@ router.get('/:installationId/config', requirePermission('apps:read'), async (req
 
     if (!installation) {
       return res.status(404).json({ success: false, message: 'Installation not found' });
+    }
+    if (!canAccessInstallation(installation, req)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
     const cfg = JSON.parse(installation.config || '{}');
@@ -512,12 +546,22 @@ router.put('/:installationId/config',
     if (!installation) {
       return res.status(404).json({ success: false, message: 'Installation not found' });
     }
+    if (!canAccessInstallation(installation, req)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     res.status(501).json({
       success: false,
       message: 'Applying configuration changes to an installed application is not implemented yet.'
     });
   }
 );
+
+// Admins can access any installation. Non-admins may only access one they
+// installed themselves (installed_applications.installed_by).
+function canAccessInstallation(installation, req) {
+  if (req.user.role === 'admin') return true;
+  return installation.installed_by === req.user.id;
+}
 
 // Helper functions
 
@@ -818,9 +862,19 @@ async function startUninstallation(installationId, installation) {
   const cfg = JSON.parse(installation.config || '{}');
 
   if (installation.install_path) {
-    await fs.rm(installation.install_path, { recursive: true, force: true }).catch(error =>
-      logger.warn(`Could not remove install directory ${installation.install_path}:`, error.message));
-    await logInstallation(installationId, 'info', `Removed ${installation.install_path}`);
+    // Defense in depth: re-check even though install-time validation
+    // should already prevent an unsafe path from ever being stored — this
+    // is a recursive delete, so it's worth a second guard against a row
+    // created before that validation existed or written directly to the DB.
+    const resolvedInstallPath = path.resolve(installation.install_path);
+    if (!isInstallPathSafe(resolvedInstallPath)) {
+      logger.error(`Refusing to recursively delete unsafe install path for installation ${installationId}: ${resolvedInstallPath}`);
+      await logInstallation(installationId, 'error', `Refused to delete unsafe path ${resolvedInstallPath} — remove it manually`);
+    } else {
+      await fs.rm(resolvedInstallPath, { recursive: true, force: true }).catch(error =>
+        logger.warn(`Could not remove install directory ${resolvedInstallPath}:`, error.message));
+      await logInstallation(installationId, 'info', `Removed ${resolvedInstallPath}`);
+    }
   }
 
   if (cfg.database && cfg.database.database) {

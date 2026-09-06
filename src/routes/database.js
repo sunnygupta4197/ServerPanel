@@ -1,16 +1,43 @@
 const express = require('express');
 const router = express.Router();
-const { exec } = require('child_process');
-const { promisify } = require('util');
+const { spawn } = require('child_process');
 const fs = require('fs').promises;
+const fsSync = require('fs');
+const zlib = require('zlib');
 const path = require('path');
+const { pipeline } = require('stream/promises');
 const { body, param, query, validationResult } = require('express-validator');
 const { requireRole, requirePermission } = require('../middleware/authMiddleware');
 const logger = require('../config/logger');
 const config = require('../config/config');
 const database = require('../config/database');
 
-const execAsync = promisify(exec);
+// Tables that hold credentials/secrets — never exposed through the
+// generic table browser below, regardless of who holds database:read.
+const SENSITIVE_TABLES = new Set([
+  'users', 'api_keys', 'token_blacklist', 'ssl_certificates',
+  'email_accounts', 'installed_applications', 'sessions'
+]);
+
+// Runs a DB-client CLI tool (mysqldump/pg_dump/mysql/psql) via argv array
+// (no shell), passing the password through an env var instead of on the
+// command line where it would be visible to any other local process via
+// `ps`/Task Manager. `stdin`/`stdoutPath` are an optional readable stream
+// to feed the child's stdin from, and a file path to write its stdout to.
+function runDbClient(bin, args, { env = {}, stdin, stdoutPath } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { env: { ...process.env, ...env } });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      code === 0 ? resolve() : reject(new Error(`${bin} exited with code ${code}: ${stderr.slice(0, 500)}`));
+    });
+
+    if (stdoutPath) child.stdout.pipe(fsSync.createWriteStream(stdoutPath));
+    if (stdin) stdin.pipe(child.stdin);
+  });
+}
 
 // Get database information
 router.get('/info', requirePermission('database:read'), async (req, res) => {
@@ -183,6 +210,9 @@ router.get('/tables/:tableName/structure',
       }
 
       const { tableName } = req.params;
+      if (SENSITIVE_TABLES.has(tableName)) {
+        return res.status(403).json({ success: false, message: 'This table cannot be inspected through the database browser' });
+      }
       const dbConfig = database.client.config;
       let structure = [];
 
@@ -264,6 +294,9 @@ router.get('/tables/:tableName/data',
       }
 
       const { tableName } = req.params;
+      if (SENSITIVE_TABLES.has(tableName)) {
+        return res.status(403).json({ success: false, message: 'This table cannot be inspected through the database browser' });
+      }
       const { page = 1, limit = 50, orderBy, orderDirection = 'asc' } = req.query;
       const offset = (page - 1) * limit;
 
@@ -333,38 +366,36 @@ router.post('/backup',
       await fs.mkdir(config.PATHS.BACKUPS, { recursive: true });
 
       const dbConfig = database.client.config.connection;
-      let command;
+      const client = database.client.config.client;
 
-      if (database.client.config.client === 'mysql' || database.client.config.client === 'mysql2') {
-        command = `mysqldump -h ${dbConfig.host} -P ${dbConfig.port} -u ${dbConfig.user} -p${dbConfig.password}`;
-        
-        if (!includeData) {
-          command += ' --no-data';
-        }
-        
-        command += ` ${dbConfig.database} > ${backupPath}`;
-      } else if (database.client.config.client === 'pg') {
-        command = `PGPASSWORD=${dbConfig.password} pg_dump -h ${dbConfig.host} -p ${dbConfig.port} -U ${dbConfig.user}`;
-        
-        if (!includeData) {
-          command += ' --schema-only';
-        }
-        
-        command += ` ${dbConfig.database} > ${backupPath}`;
-      } else if (database.client.config.client === 'sqlite3') {
+      if (client === 'mysql' || client === 'mysql2') {
+        const args = ['-h', String(dbConfig.host), '-P', String(dbConfig.port), '-u', dbConfig.user];
+        if (!includeData) args.push('--no-data');
+        args.push(dbConfig.database);
+        await runDbClient('mysqldump', args, { env: { MYSQL_PWD: dbConfig.password }, stdoutPath: backupPath });
+      } else if (client === 'pg') {
+        const args = ['-h', String(dbConfig.host), '-p', String(dbConfig.port), '-U', dbConfig.user];
+        if (!includeData) args.push('--schema-only');
+        args.push(dbConfig.database);
+        await runDbClient('pg_dump', args, { env: { PGPASSWORD: dbConfig.password }, stdoutPath: backupPath });
+      } else if (client === 'sqlite3') {
         const dbFile = dbConfig.filename || path.join(__dirname, '../data/serverpanel.db');
-        command = `sqlite3 ${dbFile} .dump > ${backupPath}`;
+        await runDbClient('sqlite3', [dbFile, '.dump'], { stdoutPath: backupPath });
       }
 
-      await execAsync(command);
-
-      // Compress if requested
+      // Compress via Node's built-in zlib instead of shelling out to `gzip`
+      // (not reliably on PATH, especially on Windows).
       if (compress) {
-        await execAsync(`gzip ${backupPath}`);
         const compressedPath = `${backupPath}.gz`;
-        
+        await pipeline(
+          fsSync.createReadStream(backupPath),
+          zlib.createGzip({ level: 9 }),
+          fsSync.createWriteStream(compressedPath)
+        );
+        await fs.unlink(backupPath).catch(() => {});
+
         const stats = await fs.stat(compressedPath);
-        
+
         res.json({
           success: true,
           message: 'Database backup created successfully',
@@ -395,8 +426,7 @@ router.post('/backup',
       logger.error('Error creating database backup:', error);
       res.status(500).json({
         success: false,
-        message: 'Failed to create database backup',
-        error: error.message
+        message: 'Failed to create database backup'
       });
     }
   }
@@ -455,35 +485,26 @@ router.post('/restore',
       }
 
       const dbConfig = database.client.config.connection;
-      let command;
+      const client = database.client.config.client;
+      const isGz = resolvedPath.endsWith('.gz');
 
-      if (database.client.config.client === 'mysql' || database.client.config.client === 'mysql2') {
-        command = `mysql -h ${dbConfig.host} -P ${dbConfig.port} -u ${dbConfig.user} -p${dbConfig.password} ${dbConfig.database}`;
-        
-        if (backupPath.endsWith('.gz')) {
-          command = `gunzip -c ${resolvedPath} | ${command}`;
-        } else {
-          command = `${command} < ${resolvedPath}`;
-        }
-      } else if (database.client.config.client === 'pg') {
-        command = `PGPASSWORD=${dbConfig.password} psql -h ${dbConfig.host} -p ${dbConfig.port} -U ${dbConfig.user} ${dbConfig.database}`;
-        
-        if (backupPath.endsWith('.gz')) {
-          command = `gunzip -c ${resolvedPath} | ${command}`;
-        } else {
-          command = `${command} < ${resolvedPath}`;
-        }
-      } else if (database.client.config.client === 'sqlite3') {
+      // Feeds the dump straight into the client's stdin — gunzipped
+      // in-stream via zlib if needed — instead of a shell `gunzip -c | ...`
+      // pipeline.
+      const stdin = isGz
+        ? fsSync.createReadStream(resolvedPath).pipe(zlib.createGunzip())
+        : fsSync.createReadStream(resolvedPath);
+
+      if (client === 'mysql' || client === 'mysql2') {
+        const args = ['-h', String(dbConfig.host), '-P', String(dbConfig.port), '-u', dbConfig.user, dbConfig.database];
+        await runDbClient('mysql', args, { env: { MYSQL_PWD: dbConfig.password }, stdin });
+      } else if (client === 'pg') {
+        const args = ['-h', String(dbConfig.host), '-p', String(dbConfig.port), '-U', dbConfig.user, dbConfig.database];
+        await runDbClient('psql', args, { env: { PGPASSWORD: dbConfig.password }, stdin });
+      } else if (client === 'sqlite3') {
         const dbFile = dbConfig.filename || path.join(__dirname, '../data/serverpanel.db');
-        
-        if (backupPath.endsWith('.gz')) {
-          command = `gunzip -c ${resolvedPath} | sqlite3 ${dbFile}`;
-        } else {
-          command = `sqlite3 ${dbFile} < ${resolvedPath}`;
-        }
+        await runDbClient('sqlite3', [dbFile], { stdin });
       }
-
-      await execAsync(command);
 
       logger.info(`Database restored from backup by ${req.user.username}: ${backupPath}`);
 
@@ -495,8 +516,7 @@ router.post('/restore',
       logger.error('Error restoring database:', error);
       res.status(500).json({
         success: false,
-        message: 'Failed to restore database',
-        error: error.message
+        message: 'Failed to restore database'
       });
     }
   }

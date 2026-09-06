@@ -17,15 +17,33 @@ const broadcast = require('../sockets/broadcast');
 const execFileAsync = promisify(execFile);
 
 // Configure multer for file uploads
+//
+// req.body.path/req.body.filename come from multipart fields the client
+// fully controls (including their order — multer parses fields in stream
+// order, so these are already populated by the time this file's callback
+// runs regardless of where in the route pipeline requirePermission/
+// isPathSafe would normally run). Both MUST be validated here directly;
+// there is no later chokepoint that sees them before the file is written.
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadPath = req.body.path || config.UPLOAD.UPLOAD_PATH;
-    cb(null, uploadPath);
+    const requestedPath = req.body.path || config.UPLOAD.UPLOAD_PATH;
+    const resolved = path.resolve(requestedPath);
+    if (!isPathSafe(resolved)) {
+      return cb(new Error('Access denied to this directory'));
+    }
+    cb(null, resolved);
   },
   filename: (req, file, cb) => {
-    // Keep original filename or use custom name
-    const filename = req.body.filename || file.originalname;
-    cb(null, filename);
+    // path.basename strips any directory component (both / and \\ on
+    // Windows) from either the client-supplied name or the original
+    // filename, which fully neutralizes traversal here regardless of what
+    // isPathSafe() would otherwise catch on the destination alone.
+    const requested = req.body.filename || file.originalname;
+    const safeName = path.basename(requested).trim();
+    if (!safeName || safeName === '.' || safeName === '..') {
+      return cb(new Error('Invalid file name'));
+    }
+    cb(null, safeName);
   }
 });
 
@@ -634,9 +652,11 @@ router.post('/permissions',
   }
 );
 
-// Create archive
+// Create archive — a write operation, gated on files:write like every
+// other write endpoint in this file (was previously files:read, which let
+// a read-only/viewer-tier account write files to disk).
 router.post('/archive',
-  requirePermission('files:read'),
+  requirePermission('files:write'),
   [
     body('paths').isArray().withMessage('Paths array is required'),
     body('archiveName').isString().withMessage('Archive name is required'),
@@ -654,8 +674,16 @@ router.post('/archive',
       }
 
       const { paths, archiveName, format = 'zip' } = req.body;
-      const archivePath = path.join(config.PATHS.BACKUPS, archiveName);
-      
+      // basename strips any directory component, so archiveName can't
+      // escape PATHS.BACKUPS via traversal (it previously went straight
+      // into path.join with no check at all, unlike every other write
+      // endpoint in this file).
+      const safeArchiveName = path.basename(archiveName);
+      if (!safeArchiveName || safeArchiveName === '.' || safeArchiveName === '..') {
+        return res.status(400).json({ success: false, message: 'Invalid archive name' });
+      }
+      const archivePath = path.join(config.PATHS.BACKUPS, safeArchiveName);
+
       // Ensure all paths are safe
       const safePaths = paths.map(p => path.resolve(p));
       for (const safePath of safePaths) {
@@ -687,21 +715,26 @@ router.post('/archive',
         }
         
         await archive.finalize();
-        
-        return new Promise((resolve, reject) => {
-          output.on('close', () => {
-            res.json({
-              success: true,
-              message: 'Archive created successfully',
-              data: {
-                archivePath,
-                size: archive.pointer()
-              }
-            });
-            resolve();
-          });
-          
+
+        // `return`ing this promise (instead of `await`ing it) would hand it
+        // to Express without the surrounding try/catch ever seeing a later
+        // rejection — and output/archive both need an 'error' listener
+        // regardless, since .pipe() doesn't forward errors between streams;
+        // an unlistened error here (disk full, permission denied) would
+        // otherwise crash the whole process as an unhandled rejection.
+        await new Promise((resolve, reject) => {
+          output.on('close', resolve);
+          output.on('error', reject);
           archive.on('error', reject);
+        });
+
+        return res.json({
+          success: true,
+          message: 'Archive created successfully',
+          data: {
+            archivePath,
+            size: archive.pointer()
+          }
         });
       } else {
         // Use tar command for tar formats
@@ -763,14 +796,30 @@ router.post('/extract',
         });
       }
 
+      try {
+        await fs.access(safeArchivePath);
+      } catch {
+        return res.status(404).json({ success: false, message: 'Archive file not found' });
+      }
+
       await fs.mkdir(safeDestPath, { recursive: true });
-      
+
       const ext = path.extname(safeArchivePath).toLowerCase();
-      
+
       if (ext === '.zip') {
-        await fsSync.createReadStream(safeArchivePath)
-          .pipe(unzipper.Extract({ path: safeDestPath }))
-          .promise();
+        // .pipe() does NOT forward 'error' events from source to
+        // destination — an unlistened error on the read stream (a
+        // corrupted file appearing mid-read, a permission error, etc.)
+        // becomes an uncaught exception that crashes the whole process,
+        // not just this request. Listen on both streams explicitly.
+        await new Promise((resolve, reject) => {
+          const readStream = fsSync.createReadStream(safeArchivePath);
+          readStream.on('error', reject);
+          readStream
+            .pipe(unzipper.Extract({ path: safeDestPath }))
+            .on('error', reject)
+            .on('close', resolve);
+        });
       } else if (ext === '.tar' || archivePath.endsWith('.tar.gz')) {
         const tarArgs = archivePath.endsWith('.tar.gz')
           ? ['-xzf', safeArchivePath, '-C', safeDestPath]
@@ -837,24 +886,49 @@ router.get('/search',
       }
 
       const results = [];
-      
+      // Bounding by match count alone (the old `results.length >= maxResults`
+      // check) never helps when nothing matches — a search from a broad
+      // path (home dir, drive root) with large trees like node_modules/.git
+      // underneath it would serially fs.stat every file at every depth
+      // level, for minutes, before giving up. Cap total items examined and
+      // wall-clock time as well, independent of how many results were found.
+      const MAX_SCANNED = 20000;
+      const MAX_DURATION_MS = 15000;
+      const startedAt = Date.now();
+      let scanned = 0;
+      let truncated = false;
+
       async function searchRecursive(dir, depth = 0) {
-        if (depth > 10 || results.length >= maxResults) return; // Prevent infinite recursion
-        
+        if (depth > 10 || results.length >= maxResults) return;
+        if (scanned >= MAX_SCANNED || Date.now() - startedAt > MAX_DURATION_MS) {
+          truncated = true;
+          return;
+        }
+
         try {
           const items = await fs.readdir(dir);
-          
+
           for (const item of items) {
             if (results.length >= maxResults) break;
-            
+            if (scanned >= MAX_SCANNED || Date.now() - startedAt > MAX_DURATION_MS) {
+              truncated = true;
+              break;
+            }
+            scanned++;
+
             const itemPath = path.join(dir, item);
-            const stats = await fs.stat(itemPath);
+            let stats;
+            try {
+              stats = await fs.stat(itemPath);
+            } catch {
+              continue; // broken symlink, permission error, etc. — skip it
+            }
             const isDir = stats.isDirectory();
-            
+
             // Check if item matches search criteria
             if (item.toLowerCase().includes(searchQuery.toLowerCase())) {
-              if ((type === 'both') || 
-                  (type === 'file' && !isDir) || 
+              if ((type === 'both') ||
+                  (type === 'file' && !isDir) ||
                   (type === 'directory' && isDir)) {
                 results.push({
                   name: item,
@@ -865,7 +939,7 @@ router.get('/search',
                 });
               }
             }
-            
+
             // Recurse into subdirectories
             if (isDir) {
               await searchRecursive(itemPath, depth + 1);
@@ -875,16 +949,17 @@ router.get('/search',
           // Skip directories we can't read
         }
       }
-      
+
       await searchRecursive(safePath);
-      
+
       res.json({
         success: true,
         data: {
           query: searchQuery,
           searchPath: safePath,
           results,
-          totalFound: results.length
+          totalFound: results.length,
+          truncated // true if the scan hit the item/time cap before exhausting the tree
         }
       });
     } catch (error) {
@@ -999,5 +1074,12 @@ function parseFileSize(sizeStr) {
   if (!match) return 50 * 1024 * 1024; // Default 50MB
   return parseInt(match[1]) * (units[match[2]] || 1);
 }
+
+// Exposed as properties on the router (a function, so this is safe) so
+// other route files needing "is this path safe to write/delete" don't
+// reinvent the same denylist a fourth time — applications.js's install/
+// uninstall path handling reuses these instead of its own copy.
+router.isPathSafe = isPathSafe;
+router.isCriticalSystemPath = isCriticalSystemPath;
 
 module.exports = router;
