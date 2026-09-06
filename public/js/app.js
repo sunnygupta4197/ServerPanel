@@ -3420,28 +3420,29 @@ class ServerPanelApp {
     tr.onclick = () => file.isDirectory ? this.openFolder(file.name) : this.openFile(file.name);
     tr.onmouseover = () => tr.style.background = 'rgba(255,255,255,0.05)';
     tr.onmouseout = () => tr.style.background = '';
-    
+
     const icon = this.getFileIcon(file);
     const size = file.isDirectory ? '--' : this.formatBytes(file.size);
-    const actions = this.getFileActions(file);
-    
+
     tr.innerHTML = `
       <td>
         <div style="display: flex; align-items: center; gap: 0.75rem;">
           <div style="color: ${this.getFileIconColor(file)}; font-size: 1.25rem;">${icon}</div>
-          <strong>${file.name}</strong>
+          <strong>${this.escapeHtml(file.name)}</strong>
         </div>
       </td>
-      <td>${file.isDirectory ? 'Folder' : this.getFileType(file.name)}</td>
+      <td>${file.isDirectory ? 'Folder' : this.escapeHtml(this.getFileType(file.name))}</td>
       <td>${size}</td>
       <td>${this.formatFileDate(file.modified)}</td>
-      <td>
-        <div style="display: flex; gap: 0.25rem;">
-          ${actions}
-        </div>
-      </td>
+      <td class="file-actions-cell"></td>
     `;
-    
+
+    const actionsWrap = document.createElement('div');
+    actionsWrap.style.display = 'flex';
+    actionsWrap.style.gap = '0.25rem';
+    this.buildFileActions(file, actionsWrap);
+    tr.querySelector('.file-actions-cell').appendChild(actionsWrap);
+
     return tr;
   }
 
@@ -3483,27 +3484,38 @@ class ServerPanelApp {
     return typeMap[ext] || 'File';
   }
 
-  getFileActions(file) {
-    let actions = '';
-    const archiveExts = ['.zip', '.tar', '.gz'];
+  // Builds real DOM buttons with real function-reference click handlers —
+  // never a string-interpolated onclick — so a filename containing a quote
+  // or HTML can't break out of an attribute/JS-string context.
+  // this.escapeHtml() alone would NOT be enough here: the browser
+  // HTML-decodes an attribute's content before handing it to the inline
+  // event-handler parser, so an escaped quote (&#39;) still becomes a real
+  // quote by the time it could terminate the string.
+  buildFileActions(file, container) {
+    const addBtn = (title, icon, handler) => {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-icon';
+      btn.title = title;
+      btn.textContent = icon;
+      btn.addEventListener('click', (e) => { e.stopPropagation(); handler(); });
+      container.appendChild(btn);
+    };
 
     if (file.isDirectory) {
-      actions += `<button class="btn btn-icon" title="Open Folder" onclick="event.stopPropagation(); window.app.openFolder('${file.name}')">📂</button>`;
-      actions += `<button class="btn btn-icon" title="Rename" onclick="event.stopPropagation(); window.app.rename('${file.name}')">✏️</button>`;
-      actions += `<button class="btn btn-icon" title="Properties" onclick="event.stopPropagation(); window.app.showProperties('${file.name}')">ℹ️</button>`;
+      addBtn('Open Folder', '📂', () => this.openFolder(file.name));
+      addBtn('Rename', '✏️', () => this.rename(file.name));
+      addBtn('Properties', 'ℹ️', () => this.showProperties(file.name));
     } else {
-      actions += `<button class="btn btn-icon" title="Edit File" onclick="event.stopPropagation(); window.app.editFile('${file.name}')">✏️</button>`;
-      actions += `<button class="btn btn-icon" title="Rename" onclick="event.stopPropagation(); window.app.rename('${file.name}')">📝</button>`;
-      actions += `<button class="btn btn-icon" title="Copy" onclick="event.stopPropagation(); window.app.copyFile('${file.name}')">📋</button>`;
-      if (archiveExts.includes(this._fileExt(file.name))) {
-        actions += `<button class="btn btn-icon" title="Extract" onclick="event.stopPropagation(); window.app.extractArchive('${file.name}')">📦</button>`;
+      addBtn('Edit File', '✏️', () => this.editFile(file.name));
+      addBtn('Rename', '📝', () => this.rename(file.name));
+      addBtn('Copy', '📋', () => this.copyFile(file.name));
+      if (['.zip', '.tar', '.gz'].includes(this._fileExt(file.name))) {
+        addBtn('Extract', '📦', () => this.extractArchive(file.name));
       }
-      actions += `<button class="btn btn-icon" title="Properties" onclick="event.stopPropagation(); window.app.showProperties('${file.name}')">ℹ️</button>`;
-      actions += `<button class="btn btn-icon" title="Download" onclick="event.stopPropagation(); window.app.downloadFile('${file.name}')">💾</button>`;
-      actions += `<button class="btn btn-icon" title="Delete" onclick="event.stopPropagation(); window.app.deleteFile('${file.name}')">🗑️</button>`;
+      addBtn('Properties', 'ℹ️', () => this.showProperties(file.name));
+      addBtn('Download', '💾', () => this.downloadFile(file.name));
+      addBtn('Delete', '🗑️', () => this.deleteFile(file.name));
     }
-
-    return actions;
   }
 
   formatFileDate(date) {
@@ -3516,18 +3528,36 @@ class ServerPanelApp {
     if (!breadcrumb) return;
 
     const pathParts = (currentPath || '/').split('/').filter(part => part);
-    let html = `<span style="color:var(--text-muted);cursor:pointer;" onclick="app.goHome()">/</span>`;
+    breadcrumb.innerHTML = '';
 
+    const rootSpan = document.createElement('span');
+    rootSpan.style.color = 'var(--text-muted)';
+    rootSpan.style.cursor = 'pointer';
+    rootSpan.textContent = '/';
+    rootSpan.addEventListener('click', () => this.goHome());
+    breadcrumb.appendChild(rootSpan);
+
+    // Path segments are real directory names (attacker-controllable, since
+    // a folder can be named anything) — built via textContent + real event
+    // listeners, not onclick string interpolation, for the same reason as
+    // buildFileActions() above.
     pathParts.forEach((part, index) => {
       const partPath = '/' + pathParts.slice(0, index + 1).join('/');
-      if (index === pathParts.length - 1) {
-        html += ` <span style="color:var(--text-primary);">${part}</span>`;
-      } else {
-        html += ` <span style="color:var(--text-muted);cursor:pointer;" onclick="app.navigateToFolder('${partPath}')">${part}</span> /`;
-      }
-    });
+      const isLast = index === pathParts.length - 1;
 
-    breadcrumb.innerHTML = html;
+      breadcrumb.appendChild(document.createTextNode(' '));
+      const span = document.createElement('span');
+      span.textContent = part;
+      if (isLast) {
+        span.style.color = 'var(--text-primary)';
+      } else {
+        span.style.color = 'var(--text-muted)';
+        span.style.cursor = 'pointer';
+        span.addEventListener('click', () => this.navigateToFolder(partPath));
+      }
+      breadcrumb.appendChild(span);
+      if (!isLast) breadcrumb.appendChild(document.createTextNode(' /'));
+    });
   }
 
   updateFilesStats(data) {
@@ -3907,36 +3937,47 @@ class ServerPanelApp {
       return;
     }
 
-    tbody.innerHTML = results.map(result => {
+    tbody.innerHTML = '';
+    results.forEach(result => {
       const isDir = result.type === 'directory';
       const icon = isDir ? '📁' : this.getFileIcon({ name: result.name, isDirectory: false });
       const size = isDir ? '--' : this.formatBytes(result.size);
       const normalizedPath = result.path.replace(/\\/g, '/');
 
-      return `
-        <tr>
-          <td>
-            <div style="display:flex;align-items:center;gap:0.75rem;">
-              <div style="font-size:1.25rem;">${icon}</div>
-              <div>
-                <strong>${this.escapeHtml(result.name)}</strong>
-                <div style="font-size:0.75rem;color:var(--text-muted);">${this.escapeHtml(normalizedPath)}</div>
-              </div>
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>
+          <div style="display:flex;align-items:center;gap:0.75rem;">
+            <div style="font-size:1.25rem;">${icon}</div>
+            <div>
+              <strong>${this.escapeHtml(result.name)}</strong>
+              <div style="font-size:0.75rem;color:var(--text-muted);">${this.escapeHtml(normalizedPath)}</div>
             </div>
-          </td>
-          <td>${isDir ? 'Folder' : this.getFileType(result.name)}</td>
-          <td>${size}</td>
-          <td>${this.formatFileDate(result.modified)}</td>
-          <td>
-            <div style="display:flex;gap:0.25rem;">
-              ${isDir
-                ? `<button class="btn btn-icon" title="Open Folder" onclick="app.navigateToFolder('${normalizedPath}')">📂</button>`
-                : `<button class="btn btn-icon" title="Reveal in folder" onclick="app.navigateToFolder('${normalizedPath.slice(0, normalizedPath.lastIndexOf('/'))}')">📂</button>`}
-            </div>
-          </td>
-        </tr>
+          </div>
+        </td>
+        <td>${isDir ? 'Folder' : this.escapeHtml(this.getFileType(result.name))}</td>
+        <td>${size}</td>
+        <td>${this.formatFileDate(result.modified)}</td>
+        <td class="search-result-actions"></td>
       `;
-    }).join('');
+
+      // Real event listener, not onclick string interpolation — normalizedPath
+      // is an attacker-controllable filesystem path, same reasoning as
+      // buildFileActions() above.
+      const targetPath = isDir ? normalizedPath : normalizedPath.slice(0, normalizedPath.lastIndexOf('/'));
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-icon';
+      btn.title = isDir ? 'Open Folder' : 'Reveal in folder';
+      btn.textContent = '📂';
+      btn.addEventListener('click', () => this.navigateToFolder(targetPath));
+      const actionsWrap = document.createElement('div');
+      actionsWrap.style.display = 'flex';
+      actionsWrap.style.gap = '0.25rem';
+      actionsWrap.appendChild(btn);
+      tr.querySelector('.search-result-actions').appendChild(actionsWrap);
+
+      tbody.appendChild(tr);
+    });
   }
 
   async archiveCurrentFolder() {
