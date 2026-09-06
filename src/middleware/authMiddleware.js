@@ -172,9 +172,15 @@ const validateLogin = [
     .withMessage('Username must be 3-50 characters and contain only letters, numbers, dots, hyphens, and underscores'),
   
   body('password')
+    // isLength()/matches() coerce non-strings via String(value) rather than
+    // rejecting them, so a JSON number here would sail through validation
+    // and reach bcrypt.compare() as a raw number — which throws a
+    // TypeError bcryptjs doesn't handle, surfacing as an unhandled 500
+    // instead of a clean 400. isString() rejects it here instead.
+    .isString().withMessage('Password must be a string')
     .isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH })
     .withMessage(`Password must be at least ${config.SECURITY.PASSWORD_MIN_LENGTH} characters long`),
-    
+
   (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -200,6 +206,7 @@ const validateRegistration = [
     .withMessage('Please provide a valid email address'),
   
   body('password')
+    .isString().withMessage('Password must be a string')
     .isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH })
     .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/)
     .withMessage(`Password must be at least ${config.SECURITY.PASSWORD_MIN_LENGTH} characters and contain at least one uppercase letter, one lowercase letter, one number, and one special character`),

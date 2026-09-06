@@ -45,6 +45,9 @@ router.get('/:id', requirePermission('ssl:read'),
   [param('id').isInt()],
   async (req, res) => {
     try {
+      const paramErrors = validationResult(req);
+      if (!paramErrors.isEmpty()) return res.status(400).json({ success: false, errors: paramErrors.array() });
+
       const cert = await database('ssl_certificates').where('id', req.params.id).first();
       if (!cert) return res.status(404).json({ success: false, message: 'Certificate not found' });
       if (!(await canAccessCert(cert, req)))
@@ -221,6 +224,9 @@ router.post('/:id/renew', requirePermission('ssl:write'),
   [param('id').isInt()],
   async (req, res) => {
     try {
+      const paramErrors = validationResult(req);
+      if (!paramErrors.isEmpty()) return res.status(400).json({ success: false, errors: paramErrors.array() });
+
       const cert = await database('ssl_certificates').where('id', req.params.id).first();
       if (!cert) return res.status(404).json({ success: false, message: 'Certificate not found' });
       if (!(await canAccessCert(cert, req)))
@@ -280,6 +286,9 @@ router.delete('/:id', requirePermission('ssl:write'),
   [param('id').isInt()],
   async (req, res) => {
     try {
+      const paramErrors = validationResult(req);
+      if (!paramErrors.isEmpty()) return res.status(400).json({ success: false, errors: paramErrors.array() });
+
       const cert = await database('ssl_certificates').where('id', req.params.id).first();
       if (!cert) return res.status(404).json({ success: false, message: 'Certificate not found' });
       if (!(await canAccessCert(cert, req)))

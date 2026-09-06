@@ -592,7 +592,7 @@ router.post('/2fa/enable',
 // the account's second factor on its own.
 router.post('/2fa/disable',
   authenticateToken,
-  [body('password').isLength({ min: 1 }).withMessage('Password is required')],
+  [body('password').isString().isLength({ min: 1 }).withMessage('Password is required')],
   async (req, res) => {
     try {
       const errors = validationResult(req);

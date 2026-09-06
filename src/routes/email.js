@@ -37,7 +37,7 @@ router.post('/accounts', requirePermission('email:write'),
       .withMessage('Invalid email local part')
       .isLength({ min: 1, max: 64 }),
     body('domain_id').isInt().withMessage('Domain ID is required'),
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('password').isString().isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
     body('quota_mb').optional().isInt({ min: 0 }).withMessage('Quota must be a non-negative integer'),
   ],
   async (req, res) => {
@@ -81,9 +81,15 @@ router.post('/accounts', requirePermission('email:write'),
 );
 
 router.put('/accounts/:id', requirePermission('email:write'),
-  [param('id').isInt()],
+  [
+    param('id').isInt(),
+    body('password').optional().isString().isLength({ min: 8 }).withMessage('Password must be a string of at least 8 characters')
+  ],
   async (req, res) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
       const account = await database('email_accounts').where('id', req.params.id).first();
       if (!account) return res.status(404).json({ success: false, message: 'Account not found' });
       if (req.user.role !== 'admin' && account.user_id !== req.user.id)

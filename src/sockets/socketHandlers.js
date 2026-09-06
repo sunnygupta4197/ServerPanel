@@ -153,8 +153,12 @@ module.exports = (io) => {
 
     // Handle chat messages (for admin communication)
     socket.on('send_message', (data) => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
       const { message, channel = 'general' } = data;
-      
+
       // Broadcast to all admins
       io.to('role_admin').emit('new_message', {
         userId: socket.userId,
@@ -162,24 +166,32 @@ module.exports = (io) => {
         channel,
         timestamp: new Date().toISOString()
       });
-      
+
       logger.info(`Message sent by ${socket.userId} to ${channel}: ${message}`);
     });
 
     // Handle notification acknowledgment
     socket.on('ack_notification', (data) => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
       const { notificationId } = data;
       logger.info(`Notification ${notificationId} acknowledged by user ${socket.userId}`);
-      
+
       // Update notification status in database
       updateNotificationStatus(notificationId, socket.userId);
     });
 
     // Handle alert acknowledgment
     socket.on('ack_alert', (data) => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
       const { alertId } = data;
       logger.info(`Alert ${alertId} acknowledged by user ${socket.userId}`);
-      
+
       // Update alert status
       updateAlertStatus(alertId, socket.userId);
     });
@@ -199,8 +211,12 @@ module.exports = (io) => {
 
     // Handle custom events
     socket.on('custom_event', (data) => {
+      if (!socket.isAuthenticated) {
+        socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
       logger.info(`Custom event received from ${socket.userId}:`, data);
-      
+
       // Broadcast to other admins if user is admin
       if (socket.userRole === 'admin') {
         socket.to('role_admin').emit('admin_event', {

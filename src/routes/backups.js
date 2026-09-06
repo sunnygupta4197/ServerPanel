@@ -108,6 +108,9 @@ router.post('/:id/restore', requirePermission('backups:write'),
   [param('id').isInt()],
   async (req, res) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
       const backup = await database('backups').where('id', req.params.id).first();
       if (!backup) return res.status(404).json({ success: false, message: 'Backup not found' });
       if (req.user.role !== 'admin' && backup.user_id !== req.user.id)
@@ -151,6 +154,9 @@ router.delete('/:id', requirePermission('backups:write'),
   [param('id').isInt()],
   async (req, res) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
       const backup = await database('backups').where('id', req.params.id).first();
       if (!backup) return res.status(404).json({ success: false, message: 'Backup not found' });
       if (req.user.role !== 'admin' && backup.user_id !== req.user.id)
@@ -227,6 +233,9 @@ router.put('/schedules/:id', requirePermission('backups:write'),
   [param('id').isInt()],
   async (req, res) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
       const schedule = await database('backup_schedules').where('id', req.params.id).first();
       if (!schedule) return res.status(404).json({ success: false, message: 'Schedule not found' });
       if (req.user.role !== 'admin' && schedule.user_id !== req.user.id)
@@ -253,6 +262,9 @@ router.delete('/schedules/:id', requirePermission('backups:write'),
   [param('id').isInt()],
   async (req, res) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
       const schedule = await database('backup_schedules').where('id', req.params.id).first();
       if (!schedule) return res.status(404).json({ success: false, message: 'Schedule not found' });
       if (req.user.role !== 'admin' && schedule.user_id !== req.user.id)

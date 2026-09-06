@@ -25,7 +25,14 @@ async function dumpDatabaseTo(stagingDir) {
   const { client, conn } = getDbInfo();
 
   if (client === 'sqlite3') {
-    await fs.copyFile(conn.filename, path.join(stagingDir, DB_SQLITE_ENTRY));
+    // VACUUM INTO (not fs.copyFile) so this works uniformly whether the
+    // live DB is a real file or ':memory:' (a bare copyFile of the literal
+    // string ":memory:" as if it were a path is exactly what crashed this
+    // in the past — found independently by three separate test agents).
+    // It also avoids copying a file that could be mid-write.
+    const destPath = path.join(stagingDir, DB_SQLITE_ENTRY);
+    await fs.rm(destPath, { force: true }); // VACUUM INTO refuses to overwrite an existing file
+    await database.raw('VACUUM INTO ?', [destPath]);
     return;
   }
 
