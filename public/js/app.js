@@ -1215,10 +1215,21 @@ class ServerPanelApp {
     }, 10);
   }
 
-  // Expand monitoring card details inline
+  // Routes each monitoring stat card's click to its real, fetch-backed
+  // detail modal (showCpuProcessesModal, etc. below) — these were fully
+  // built and working, just disconnected when card clicks were rewired to
+  // this function and left as a placeholder toast promising an inline
+  // expansion that was never implemented.
   expandMonitoringCard(type) {
-    this.showToast(`${type.toUpperCase()} details will show inline here - better than modal!`, 'info');
-    // TODO: Implement inline card expansion for monitoring page
+    const modalByType = {
+      cpu: () => this.showCpuProcessesModal(),
+      memory: () => this.showMemoryDetailsModal(),
+      network: () => this.showNetworkConnectionsModal(),
+      disk: () => this.showDiskProcessesModal()
+    };
+    const openModal = modalByType[type];
+    if (openModal) openModal();
+    else this.showToast(`No details available for ${type}`, 'info');
   }
 
   // Show memory details modal
@@ -1981,20 +1992,30 @@ class ServerPanelApp {
   // Start periodic stats updates for real-time dashboard
   startPeriodicStatsUpdate() {
     console.log('Starting periodic stats updates...');
-    
+
     // Clear any existing interval
     if (this.statsInterval) {
       clearInterval(this.statsInterval);
     }
-    
-    // Update stats every 5 seconds
+
+    // This used to poll every 5 seconds — the exact same cadence the
+    // server already pushes 'systemStats' over the socket at (see
+    // systemMonitor.start(5000) in socketHandlers.js), making this a pure
+    // duplicate of live data the dashboard already receives. At 5s it was
+    // also enough on its own to exhaust the global API rate limit
+    // (100 req/15min) within about 9 minutes of just leaving the tab open.
+    // Kept as a much slower fallback for when the socket connection is
+    // down, not as the primary update path.
     this.statsInterval = setInterval(async () => {
+      // Skip the HTTP round-trip entirely while the socket is healthy —
+      // it's already pushing this exact data every 5s.
+      if (this.socket && this.socket.connected) return;
       try {
         const response = await fetch('/api/system/stats', {
           headers: {
           }
         });
-        
+
         if (response.ok) {
           const data = await response.json();
           
@@ -2028,7 +2049,7 @@ class ServerPanelApp {
           this.connectionErrorShown = true;
         }
       }
-    }, 5000);
+    }, 60000);
   }
 
   // Update system stats
@@ -3350,9 +3371,28 @@ class ServerPanelApp {
   }
 
   showServiceLogs(serviceName, logs) {
-    // Create a modal or dedicated view for service logs
-    console.log(`Logs for ${serviceName}:`, logs);
-    this.showToast(`Loaded ${logs.length} log entries for ${serviceName}`, 'info');
+    const rows = (logs || []).length
+      ? logs.map(entry => `
+          <div style="display:flex;gap:0.75rem;padding:0.4rem 0;border-bottom:1px solid var(--border);font-family:monospace;font-size:0.78rem;">
+            <span style="color:var(--text-muted);flex-shrink:0;white-space:nowrap;">${entry.timestamp ? new Date(entry.timestamp).toLocaleString() : ''}</span>
+            <span style="color:var(--text-secondary);flex-shrink:0;">${this.escapeHtml(String(entry.level ?? ''))}</span>
+            <span style="color:var(--text-primary);word-break:break-word;">${this.escapeHtml(entry.message || '')}</span>
+          </div>`).join('')
+      : `<div style="text-align:center;padding:2rem;color:var(--text-muted);">No log entries found.</div>`;
+
+    const modalHtml = `
+      <div class="modal active" id="service-logs-modal">
+        <div class="modal-content" style="max-width: 900px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem;">
+            <h3 style="color: var(--text-primary); margin: 0;">Logs — ${this.escapeHtml(serviceName)}</h3>
+            <button id="close-service-logs-modal" style="background: none; border: none; color: var(--text-secondary); font-size: 1.5rem; cursor: pointer;">&times;</button>
+          </div>
+          <div style="max-height:60vh;overflow-y:auto;">${rows}</div>
+        </div>
+      </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    this.setupModalCloseHandlers('service-logs-modal');
   }
 
   // Utility methods
@@ -4716,6 +4756,13 @@ class ServerPanelApp {
         return;
       }
       const typeColor = { A:'#60a5fa',AAAA:'#60a5fa',CNAME:'#a78bfa',MX:'#34d399',TXT:'#fbbf24',NS:'#f87171',SRV:'#fb923c',PTR:'#94a3b8' };
+      // rgba() doesn't accept a hex literal as its first argument
+      // (rgba(#60a5fa,0.15) is invalid CSS and gets silently dropped) —
+      // needs actual r,g,b components.
+      const hexToRgb = (hex) => {
+        const n = parseInt(hex.slice(1), 16);
+        return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+      };
       el.innerHTML = `
         <table style="width:100%;border-collapse:collapse;font-size:0.875rem;">
           <thead><tr style="border-bottom:1px solid var(--border);">
@@ -4727,7 +4774,7 @@ class ServerPanelApp {
           </tr></thead>
           <tbody>${data.data.map(r => `
             <tr style="border-bottom:1px solid var(--border);">
-              <td style="padding:0.6rem 0.75rem;"><span style="padding:0.2rem 0.5rem;background:rgba(${typeColor[r.type]||'#94a3b8'},0.15);color:${typeColor[r.type]||'#94a3b8'};border-radius:4px;font-weight:700;font-size:0.7rem;">${r.type}</span></td>
+              <td style="padding:0.6rem 0.75rem;"><span style="padding:0.2rem 0.5rem;background:rgba(${hexToRgb(typeColor[r.type]||'#94a3b8')},0.15);color:${typeColor[r.type]||'#94a3b8'};border-radius:4px;font-weight:700;font-size:0.7rem;">${r.type}</span></td>
               <td style="padding:0.6rem 0.75rem;color:var(--text-primary);font-family:monospace;">${this.escapeHtml(r.name)}</td>
               <td style="padding:0.6rem 0.75rem;color:var(--text-secondary);font-family:monospace;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${this.escapeHtml(r.value)}">${this.escapeHtml(r.value)}</td>
               <td style="padding:0.6rem 0.75rem;color:var(--text-secondary);">${r.ttl}s</td>
