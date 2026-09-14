@@ -10,10 +10,24 @@
 // injection surface here regardless of what a non-admin account does with
 // it — that's the whole point of this being a separate, much smaller
 // module instead of just loosening terminal.js's own gate.
+//
+// list_domain_files specifically must never shell out with documentRoot as
+// an argument: it's domains.document_root, settable to an arbitrary string
+// by any domain owner via PUT /api/domains/:id (domains:write, not admin),
+// and cmd.exe on Windows does its own command-line parsing that doesn't
+// match the CommandLineToArgvW-style quoting Node/libuv applies to argv —
+// a trailing-backslash-before-quote payload (e.g. `C:\x\" & calc.exe & rem
+// "`) breaks that quoting and lets cmd.exe treat the rest as a second,
+// attacker-chosen command, even though execFile never spawns a shell on
+// its own. Proven live against this exact call shape before being fixed.
+// fs.readdir sidesteps the whole class — no process, no argv, no parser
+// that could ever reinterpret the path as anything but a path.
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const os = require('os');
 const fsSync = require('fs');
+const fs = require('fs').promises;
+const path = require('path');
 const config = require('../config/config');
 
 const execFileAsync = promisify(execFile);
@@ -66,12 +80,19 @@ const ACTIONS = {
       if (!fsSync.existsSync(documentRoot)) {
         return `Directory does not exist: ${documentRoot}`;
       }
-      if (config.SYSTEM.IS_WINDOWS) {
-        const { stdout } = await execFileAsync('cmd.exe', ['/d', '/c', 'dir', documentRoot]);
-        return stdout.trim();
-      }
-      const { stdout } = await execFileAsync('ls', ['-la', documentRoot]);
-      return stdout.trim();
+      const entries = await fs.readdir(documentRoot, { withFileTypes: true });
+      const rows = await Promise.all(entries.map(async (entry) => {
+        let size = '-';
+        let mtime = '';
+        try {
+          const stat = await fs.stat(path.join(documentRoot, entry.name));
+          size = entry.isDirectory() ? '-' : String(stat.size);
+          mtime = stat.mtime.toISOString();
+        } catch { /* entry may have been removed/unreadable between readdir and stat */ }
+        const kind = entry.isDirectory() ? 'dir' : entry.isSymbolicLink() ? 'link' : 'file';
+        return `${kind.padEnd(4)} ${size.padStart(10)}  ${mtime}  ${entry.name}`;
+      }));
+      return rows.length ? rows.join('\n') : '(empty directory)';
     }
   }
 };
