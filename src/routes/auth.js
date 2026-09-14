@@ -444,8 +444,12 @@ router.post('/change-password',
   authLimiter,
   authenticateToken,
   [
-    body('currentPassword').isLength({ min: 1 }).withMessage('Current password is required'),
-    body('newPassword').isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH })
+    // isString() first — the one spot the session's blanket password-field
+    // fix missed. Without it, a non-string currentPassword/newPassword
+    // reaches bcrypt.compare()/hash() as a raw value and throws, surfacing
+    // as a 500 instead of a clean 400.
+    body('currentPassword').isString().isLength({ min: 1 }).withMessage('Current password is required'),
+    body('newPassword').isString().isLength({ min: config.SECURITY.PASSWORD_MIN_LENGTH })
       .withMessage(`New password must be at least ${config.SECURITY.PASSWORD_MIN_LENGTH} characters long`)
   ],
   async (req, res) => {
@@ -706,6 +710,20 @@ router.post('/refresh', async (req, res) => {
     });
 
   } catch (error) {
+    // Mirrors GET /verify's catch block, which this route duplicates JWT
+    // verification logic from rather than sharing. Without this, a
+    // malformed/tampered token (jwt.verify throws JsonWebTokenError even
+    // with ignoreExpiration: true) fell through to the generic 500 below
+    // instead of a clean 401 — confirmed live: a garbage token and a
+    // tampered-signature token both produced a 500 here while /verify
+    // correctly 401'd the identical inputs.
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid token'
+      });
+    }
+
     logger.error('Token refresh error:', error);
     res.status(500).json({
       success: false,

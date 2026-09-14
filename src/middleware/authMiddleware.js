@@ -7,11 +7,34 @@ const logger = require('../config/logger');
 const database = require('../config/database');
 const settingsCache = require('../config/settingsCache');
 
+// Parses a subset of jsonwebtoken's "expiresIn" duration syntax (a plain
+// number of seconds, or a number followed by s/m/h/d) into milliseconds —
+// just enough to give config.JWT_EXPIRE ('24h' by default, or whatever an
+// operator sets via the env var) a real effect as the fallback below. The
+// comment on getSessionTimeoutMs() previously claimed this fallback
+// already happened, but the code hardcoded 24h and never read JWT_EXPIRE
+// at all — any deployment that customized session length via that env var
+// silently lost the setting the moment settingsCache existed, since a
+// fresh install has no security.session_timeout row until someone saves
+// one through the Settings UI.
+function parseDurationToMs(value, fallbackMs) {
+  if (value == null) return fallbackMs;
+  if (typeof value === 'number') return value * 1000;
+  const match = /^(\d+)\s*(s|m|h|d)?$/i.exec(String(value).trim());
+  if (!match) return fallbackMs;
+  const amount = Number(match[1]);
+  const unit = (match[2] || 's').toLowerCase();
+  const multipliers = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+  return amount * multipliers[unit];
+}
+
+const JWT_EXPIRE_MS = parseDurationToMs(config.JWT_EXPIRE, 24 * 60 * 60 * 1000);
+
 // Live-configurable via Settings > General (security.session_timeout,
 // stored in ms) — falls back to config.JWT_EXPIRE's static default when
 // unset. Shared by generateToken() and every cookie-setting call site in
 // auth.js so the JWT's own expiry and the cookie's maxAge stay consistent.
-const getSessionTimeoutMs = () => settingsCache.getNumber('security.session_timeout', 24 * 60 * 60 * 1000);
+const getSessionTimeoutMs = () => settingsCache.getNumber('security.session_timeout', JWT_EXPIRE_MS);
 
 // In-memory blacklist cache — O(1) lookup before hitting DB.
 // Tokens blacklisted in a previous process run are caught by the DB fallback.
@@ -22,9 +45,22 @@ const activityCache = new Map();
 const ACTIVITY_DEBOUNCE = 5 * 60 * 1000;
 
 // Rate limiter for login attempts
+//
+// `max` reads settingsCache on every request (express-rate-limit v6
+// supports a function here) so raising security.max_login_attempts via
+// Settings actually loosens this ceiling immediately — it previously
+// captured config.SECURITY.MAX_LOGIN_ATTEMPTS once at require() time and
+// never looked at settingsCache again, so the live setting had no effect
+// on this specific limiter (recordFailedAttempt()'s own lockout logic
+// already respected it correctly; this was the other half of the same
+// feature). `windowMs` can't be made dynamic the same way — express-
+// rate-limit's store is initialized with a fixed window duration — so
+// security.lockout_duration still requires a process restart to change
+// this limiter's window (it already live-applies to the separate
+// lockout_until column recordFailedAttempt() writes).
 const loginLimiter = rateLimit({
   windowMs: config.SECURITY.LOCKOUT_TIME,
-  max: config.SECURITY.MAX_LOGIN_ATTEMPTS,
+  max: (req) => settingsCache.getNumber('security.max_login_attempts', config.SECURITY.MAX_LOGIN_ATTEMPTS),
   message: {
     error: 'Too many login attempts, please try again later',
     retryAfter: Math.ceil(config.SECURITY.LOCKOUT_TIME / 1000)
