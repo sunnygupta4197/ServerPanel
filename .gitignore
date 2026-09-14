@@ -17,3 +17,6 @@ coverage/
 # python side project (venv + local db)
 python/venv/
 python/instance/
+
+# multi-agent audit checkpoints (scratch, not project content)
+.audit-checkpoints/
