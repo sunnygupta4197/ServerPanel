@@ -1,6 +1,18 @@
 // knexfile.js - Database configuration for Knex migrations
 const path = require('path');
 
+// SQLite doesn't enforce foreign keys by default — see the matching fix
+// and full reasoning in src/config/database.js, which the app's own
+// runtime and the jest suite both actually use (this file's `development`/
+// `testing` configs only matter for the standalone `npx knex ...` CLI, a
+// manual/dev convenience — but keeping this consistent means a migration
+// run by hand behaves identically to one run by the app itself, rather
+// than silently differing on whether ON DELETE CASCADE/SET NULL actually
+// fire).
+function enableSqliteForeignKeys(conn, done) {
+  conn.run('PRAGMA foreign_keys = ON', (err) => done(err, conn));
+}
+
 module.exports = {
   development: {
     client: process.env.DB_CLIENT || 'sqlite3',
@@ -18,7 +30,8 @@ module.exports = {
     debug: process.env.DB_DEBUG === 'true',
     pool: {
       min: 2,
-      max: 10
+      max: 10,
+      afterCreate: (process.env.DB_CLIENT || 'sqlite3') === 'sqlite3' ? enableSqliteForeignKeys : undefined
     }
   },
 
@@ -34,7 +47,17 @@ module.exports = {
     seeds: {
       directory: path.join(__dirname, 'seeds')
     },
-    useNullAsDefault: true
+    useNullAsDefault: true,
+    // min:1/max:1 matters here independently of the FK fix — an
+    // in-memory sqlite DB only exists for the lifetime of a single
+    // connection, so a bigger pool would give migrations and queries
+    // each their own, mostly table-less, database (same reasoning
+    // src/config/database.js already applies to its own `:memory:` case).
+    pool: {
+      min: 1,
+      max: 1,
+      afterCreate: enableSqliteForeignKeys
+    }
   },
 
   production: {
