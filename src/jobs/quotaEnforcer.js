@@ -88,7 +88,16 @@ async function checkEmailQuotas() {
   }
 }
 
+// Guards against a second, un-trackable, un-stoppable cron.schedule()
+// task if start() is ever called twice in the same process (e.g. tests
+// that construct more than one ServerPanelApp instance) — see
+// backupScheduler.js's identical guard for the fuller reasoning.
+let started = false;
+
 function start() {
+  if (started) return;
+  started = true;
+
   // Every 15 minutes — frequent enough that an account going over quota
   // doesn't stay wrongly-active for long, infrequent enough that walking
   // every account's directory tree isn't a constant background cost.

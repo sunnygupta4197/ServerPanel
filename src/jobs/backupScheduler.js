@@ -68,7 +68,18 @@ async function runScheduledBackup(schedule) {
   });
 }
 
+// Guards against registering a second, un-trackable, un-stoppable
+// cron.schedule() task if start() is ever called twice in the same
+// process (e.g. tests that construct more than one ServerPanelApp
+// instance) — cron.schedule() itself has no built-in "already running"
+// check, so without this a repeat call just silently piles up another
+// tick handler ticking forever alongside the first.
+let started = false;
+
 function start() {
+  if (started) return;
+  started = true;
+
   cron.schedule('* * * * *', async () => {
     try {
       const due = await database('backup_schedules')

@@ -21,6 +21,15 @@ async function resyncMail() {
   return result;
 }
 
+// Forwarders are a separate Postfix mechanism (virtual_alias_maps) from
+// mailboxes (virtual_mailbox_maps) — see mailService.syncForwarders — so
+// this is a separate resync, not folded into resyncMail() above, even
+// though both ultimately touch the same Postfix installation.
+async function resyncForwarders() {
+  const forwarders = await database('email_forwarders').select('*');
+  return mailService.syncForwarders(forwarders);
+}
+
 // --- Email Accounts ---
 
 router.get('/accounts', requirePermission('email:read'), async (req, res) => {
@@ -242,8 +251,16 @@ router.post('/forwarders', requirePermission('email:write'),
         updated_at: new Date()
       });
 
-      logger.info(`Email forwarder ${source} → ${destination} created by ${req.user.username}`);
-      res.status(201).json({ success: true, message: 'Forwarder created', data: { id, source, destination } });
+      const syncResult = await resyncForwarders();
+
+      logger.info(`Email forwarder ${source} → ${destination} created by ${req.user.username}${syncResult.activated ? '' : ' (not yet activated on the mail server — see setup instructions)'}`);
+      res.status(201).json({
+        success: true,
+        message: syncResult.activated
+          ? 'Forwarder created and activated on the mail server'
+          : `Forwarder created (not yet activated on the mail server: ${syncResult.reason || 'see setup instructions'})`,
+        data: { id, source, destination }
+      });
     } catch (err) {
       logger.error('Error creating forwarder:', err);
       res.status(500).json({ success: false, message: 'Failed to create forwarder' });
@@ -265,6 +282,7 @@ router.delete('/forwarders/:id', requirePermission('email:write'),
       }
 
       await database('email_forwarders').where('id', req.params.id).delete();
+      await resyncForwarders();
       logger.info(`Email forwarder ${fwd.source} → ${fwd.destination} deleted by ${req.user.username}`);
       res.json({ success: true, message: 'Forwarder deleted' });
     } catch (err) {

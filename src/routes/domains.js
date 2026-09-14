@@ -212,16 +212,17 @@ router.delete('/:id', requirePermission('domains:write'),
       if (req.user.role !== 'admin' && domain.user_id !== req.user.id)
         return res.status(403).json({ success: false, message: 'Access denied' });
 
-      // dns_records, email_accounts, and any domain-scoped cron_jobs (see
+      // dns_records, email_accounts, email_forwarders, and any
+      // domain-scoped cron_jobs (see
       // migrations/scheduled_cron_jobs_safe_actions.js) all CASCADE-delete
       // at the DB level when their domain_id's parent row disappears —
       // that's a plain FK cascade inside the database engine, so it runs
       // no application code at all. Left alone, that means a deleted
-      // domain's real BIND zone and Postfix/Dovecot mailboxes would keep
-      // working on the real servers indefinitely (nothing ever told them
-      // the accounts/records are gone), and any cron job scoped to this
-      // domain would keep firing on schedule forever — its DB row is
-      // gone, but cronJobRunner.js's in-memory node-cron task was never
+      // domain's real BIND zone and Postfix/Dovecot mailboxes/forwarders
+      // would keep working on the real servers indefinitely (nothing ever
+      // told them the accounts/records are gone), and any cron job scoped
+      // to this domain would keep firing on schedule forever — its DB row
+      // is gone, but cronJobRunner.js's in-memory node-cron task was never
       // told to stop; runJob() would just silently no-op every time it
       // fires (see cronJobRunner.js: `if (!job...) return;`), which
       // doesn't error but leaks a timer for the life of the process.
@@ -242,6 +243,10 @@ router.delete('/:id', requirePermission('domains:write'),
       const remainingEmailAccounts = await database('email_accounts').select('*');
       await mailService.syncMailConfig(remainingEmailAccounts).catch(err =>
         logger.warn(`Mail config resync failed after deleting domain ${domain.domain}:`, err.message));
+
+      const remainingForwarders = await database('email_forwarders').select('*');
+      await mailService.syncForwarders(remainingForwarders).catch(err =>
+        logger.warn(`Forwarder resync failed after deleting domain ${domain.domain}:`, err.message));
 
       logger.info(`Domain ${domain.domain} deleted by ${req.user.username}`);
       res.json({ success: true, message: 'Domain deleted' });

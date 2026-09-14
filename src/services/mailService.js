@@ -33,6 +33,7 @@ const execFileAsync = promisify(execFile);
 const MAIL_CONFIG_DIR = path.join(config.PATHS.CONFIGS, 'mail');
 const VMAILBOX_SOURCE_FILE = path.join(MAIL_CONFIG_DIR, 'postfix_vmailbox');
 const VDOMAINS_SOURCE_FILE = path.join(MAIL_CONFIG_DIR, 'postfix_vdomains');
+const VALIAS_SOURCE_FILE = path.join(MAIL_CONFIG_DIR, 'postfix_valias');
 const DOVECOT_PASSWD_FILE = path.join(MAIL_CONFIG_DIR, 'dovecot_users');
 // Where real maildirs actually live. Configurable via MAIL_ROOT for a
 // deployment that wants mail storage on a different mount than the app's
@@ -146,6 +147,37 @@ async function syncMailConfig(accounts) {
   }
 }
 
+// Forwarders are a genuinely separate Postfix mechanism from mailboxes —
+// virtual_alias_maps ("deliver mail addressed to A to B instead") rather
+// than virtual_mailbox_maps ("A has a real mailbox here") — so this is
+// deliberately a second sync function, not folded into syncMailConfig,
+// even though both ultimately edit the same Postfix installation. Email
+// forwarders had no real activation path at all until this function
+// existed: email.js's /forwarders routes were pure database bookkeeping,
+// same gap class email accounts themselves had before mailService.js.
+async function syncForwarders(forwarders) {
+  const support = await detectMailServerSupport();
+  if (!support.available) {
+    return { activated: false, reason: support.reason };
+  }
+
+  const activeForwarders = forwarders.filter(f => f.is_active);
+
+  try {
+    await fs.mkdir(MAIL_CONFIG_DIR, { recursive: true });
+
+    // Postfix virtual_alias_maps: "source@domain  destination@domain"
+    const valiasLines = activeForwarders.map(f => `${f.source}\t${f.destination}`);
+    await fs.writeFile(VALIAS_SOURCE_FILE, valiasLines.join('\n') + (valiasLines.length ? '\n' : ''));
+    await execFileAsync('postmap', [VALIAS_SOURCE_FILE]);
+
+    return { activated: true };
+  } catch (error) {
+    logger.warn('Mail: Postfix forwarder sync failed, forwarder still saved in the app:', error.message);
+    return { activated: false, reason: `forwarder sync failed: ${error.message}` };
+  }
+}
+
 // One-time manual configuration an operator needs to apply to Postfix's
 // main.cf and Dovecot's conf.d for the files this module generates to
 // actually take effect — intentionally never applied automatically (see
@@ -157,7 +189,8 @@ function getSetupInstructions() {
       `virtual_mailbox_maps = hash:${VMAILBOX_SOURCE_FILE}`,
       `virtual_mailbox_base = ${MAIL_ROOT}`,
       'virtual_uid_maps = static:5000',
-      'virtual_gid_maps = static:5000'
+      'virtual_gid_maps = static:5000',
+      `virtual_alias_maps = hash:${VALIAS_SOURCE_FILE}`
     ],
     dovecotConfLines: [
       'passdb {',
@@ -180,6 +213,7 @@ module.exports = {
   computeMailCryptHash,
   detectMailServerSupport,
   syncMailConfig,
+  syncForwarders,
   getSetupInstructions,
   maildirFor,
   MAIL_ROOT

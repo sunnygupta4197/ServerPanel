@@ -451,17 +451,21 @@ router.delete('/:id',
           logger.error(`Failed to drop real database "${db.db_name}" (owner user #${id} deleted) — it may still exist on the server with no app-side record:`, err.message));
       }
 
-      // ftp_accounts/email_accounts belonging to this user (directly, or
-      // via one of their now-deleted domains) are already gone from the
-      // DB by this point — a plain resync from whatever's left correctly
-      // excludes them, same "rebuild from current state" pattern every
-      // other create/update/delete already uses.
+      // ftp_accounts/email_accounts/email_forwarders belonging to this
+      // user (directly, or via one of their now-deleted domains) are
+      // already gone from the DB by this point — a plain resync from
+      // whatever's left correctly excludes them, same "rebuild from
+      // current state" pattern every other create/update/delete already
+      // uses.
       const remainingFtpAccounts = await database('ftp_accounts').select('*');
       await ftpService.syncVsftpdConfig(remainingFtpAccounts).catch(err =>
         logger.warn(`FTP resync failed after deleting user #${id}:`, err.message));
       const remainingEmailAccounts = await database('email_accounts').select('*');
       await mailService.syncMailConfig(remainingEmailAccounts).catch(err =>
         logger.warn(`Mail config resync failed after deleting user #${id}:`, err.message));
+      const remainingForwarders = await database('email_forwarders').select('*');
+      await mailService.syncForwarders(remainingForwarders).catch(err =>
+        logger.warn(`Forwarder resync failed after deleting user #${id}:`, err.message));
 
       // Log user deletion
       await database('activity_logs').insert({

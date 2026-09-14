@@ -81,7 +81,16 @@ async function runTick() {
   }
 }
 
+// Guards against a second, un-trackable, un-stoppable cron.schedule()
+// task if start() is ever called twice in the same process (e.g. tests
+// that construct more than one ServerPanelApp instance) — see
+// backupScheduler.js's identical guard for the fuller reasoning.
+let started = false;
+
 function start() {
+  if (started) return;
+  started = true;
+
   // Once a day is plenty for a 30-day renewal window — Let's Encrypt's own
   // client recommendation is "check twice a day", but this panel issues
   // one domain per certificate with no shared rate-limit pressure across
