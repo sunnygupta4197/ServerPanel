@@ -12,6 +12,7 @@ const logger = require('../config/logger');
 const ftpService = require('./ftpService');
 const mailService = require('./mailService');
 const dnsService = require('./dnsService');
+const phpService = require('./phpService');
 const cronJobRunner = require('../jobs/cronJobRunner');
 
 const FILES_ENTRY = 'files';
@@ -209,16 +210,17 @@ async function restoreEmailsFrom(jsonPath) {
 
 // Restoring a database (whether the full-DB path or the narrower
 // emails.json path) writes rows for ftp_accounts/email_accounts/
-// email_forwarders/dns_records/cron_jobs straight into the database via
-// a raw transaction — none of the routes that normally call
-// ftpService.syncVsftpdConfig() / mailService.syncMailConfig() /
-// mailService.syncForwarders() / dnsService.syncBindZone() /
-// cronJobRunner.register() on every create/update/delete run here, so
-// without this, a restored account, forwarder, DNS record, or cron job
-// would sit in the app's own database looking right while the real
-// vsftpd/Postfix/Dovecot/BIND config and in-memory cron schedule all
-// still reflect whatever was there right before the restore. Best-effort
-// like every other sync in this codebase — a host with none of those
+// email_forwarders/dns_records/domains(.php_version)/cron_jobs straight
+// into the database via a raw transaction — none of the routes that
+// normally call ftpService.syncVsftpdConfig() / mailService.syncMailConfig()
+// / mailService.syncForwarders() / dnsService.syncBindZone() /
+// phpService.activateDomainPhpVersion() / cronJobRunner.register() on
+// every create/update/delete run here, so without this, a restored
+// account, forwarder, DNS record, PHP assignment, or cron job would sit
+// in the app's own database looking right while the real vsftpd/Postfix/
+// Dovecot/BIND/php-fpm config and in-memory cron schedule all still
+// reflect whatever was there right before the restore. Best-effort like
+// every other sync in this codebase — a host with none of those
 // daemons installed just gets the usual "not available" from each.
 async function resyncRealIntegrationsAfterRestore() {
   try {
@@ -239,6 +241,11 @@ async function resyncRealIntegrationsAfterRestore() {
       const records = await database('dns_records').where('domain_id', domain.id);
       await dnsService.syncBindZone(domain.domain, records).catch(err =>
         logger.warn(`Post-restore DNS resync failed for ${domain.domain}:`, err.message));
+
+      if (domain.php_version) {
+        await phpService.activateDomainPhpVersion(domain.domain, domain.php_version, domain.document_root || `/var/www/${domain.domain}`).catch(err =>
+          logger.warn(`Post-restore PHP-FPM activation failed for ${domain.domain}:`, err.message));
+      }
     }
 
     // A restore can add, remove, or change any cron_jobs row out from

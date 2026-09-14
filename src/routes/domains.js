@@ -248,6 +248,17 @@ router.delete('/:id', requirePermission('domains:write'),
       await mailService.syncForwarders(remainingForwarders).catch(err =>
         logger.warn(`Forwarder resync failed after deleting domain ${domain.domain}:`, err.message));
 
+      // domains.php_version isn't a CASCADE relationship (it's a plain
+      // column on the domain row itself, gone along with it either way) —
+      // but activateDomainPhpVersion writes a real, separately-running
+      // php-fpm pool file+process that nothing else ever pointed back at
+      // this domain row, so it needs its own explicit teardown call, not
+      // just a resync-from-remaining-state like FTP/mail above.
+      if (domain.php_version) {
+        await phpService.deactivateDomainPhpVersion(domain.domain, domain.php_version).catch(err =>
+          logger.warn(`PHP-FPM pool cleanup failed for deleted domain ${domain.domain}:`, err.message));
+      }
+
       logger.info(`Domain ${domain.domain} deleted by ${req.user.username}`);
       res.json({ success: true, message: 'Domain deleted' });
     } catch (err) {

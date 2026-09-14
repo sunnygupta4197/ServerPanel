@@ -12,6 +12,7 @@ const dnsService = require('../services/dnsService');
 const mailService = require('../services/mailService');
 const ftpService = require('../services/ftpService');
 const customerDatabaseService = require('../services/customerDatabaseService');
+const phpService = require('../services/phpService');
 const cronJobRunner = require('../jobs/cronJobRunner');
 
 // Rejects any permission string that isn't one the app actually grants
@@ -445,6 +446,12 @@ router.delete('/:id',
       for (const domain of ownedDomains) {
         await dnsService.removeZone(domain.domain).catch(err =>
           logger.warn(`DNS zone cleanup failed for domain ${domain.domain} (owner user #${id} deleted):`, err.message));
+        // Same reasoning as domains.js's own DELETE /:id — a real,
+        // separately-running php-fpm pool has no other cleanup trigger.
+        if (domain.php_version) {
+          await phpService.deactivateDomainPhpVersion(domain.domain, domain.php_version).catch(err =>
+            logger.warn(`PHP-FPM pool cleanup failed for domain ${domain.domain} (owner user #${id} deleted):`, err.message));
+        }
       }
       for (const db of ownedDatabases) {
         await customerDatabaseService.dropDatabase(db).catch(err =>

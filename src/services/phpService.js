@@ -171,8 +171,44 @@ async function activateDomainPhpVersion(domain, version, documentRoot) {
   }
 }
 
+// Counterpart to activateDomainPhpVersion that never existed until now —
+// deleting a domain never removed its php-fpm pool file, leaving a real,
+// still-running pool process (and listening socket) behind for a domain
+// that no longer exists anywhere in the app. Same deterministic pool
+// naming as activateDomainPhpVersion, so this can reconstruct the path
+// without needing it stored anywhere.
+async function deactivateDomainPhpVersion(domain, version) {
+  if (config.SYSTEM.IS_WINDOWS || !version) {
+    return { deactivated: false, reason: 'nothing to deactivate' };
+  }
+
+  const poolDir = findPoolDir(version);
+  if (!poolDir) {
+    return { deactivated: false, reason: `No standard php-fpm pool directory found for PHP ${version}` };
+  }
+
+  try {
+    const poolName = `domain-${domain.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+    const poolFile = path.join(poolDir, `${poolName}.conf`);
+
+    const existed = fsSync.existsSync(poolFile);
+    if (existed) {
+      await fs.unlink(poolFile);
+      const serviceName = `php${version}-fpm`;
+      await execFileAsync('systemctl', ['reload', serviceName]).catch(err =>
+        logger.warn(`Removed FPM pool for ${domain} but could not reload ${serviceName}:`, err.message));
+    }
+
+    return { deactivated: existed };
+  } catch (error) {
+    logger.warn(`Could not remove php-fpm pool for domain ${domain}:`, error.message);
+    return { deactivated: false, reason: `Could not remove php-fpm pool config: ${error.message}` };
+  }
+}
+
 module.exports = {
   detectInstalledVersions,
   refreshDetectedVersions,
-  activateDomainPhpVersion
+  activateDomainPhpVersion,
+  deactivateDomainPhpVersion
 };
