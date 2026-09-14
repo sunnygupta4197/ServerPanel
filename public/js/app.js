@@ -6131,7 +6131,7 @@ class ServerPanelApp {
               <div style="display:flex;gap:0.25rem;">
                 <button class="btn btn-icon btn-sm" title="Run Now" onclick="app.runSafeCronJobNow(${job.id})"><i class="fas fa-play"></i></button>
                 <button class="btn btn-icon btn-sm" title="View Output" onclick="app.showSafeCronOutput(${job.id})"><i class="fas fa-align-left"></i></button>
-                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteSafeCronJob(${job.id}, '${this.escapeHtml(job.name)}')"><i class="fas fa-trash"></i></button>
+                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteSafeCronJob(${job.id})"><i class="fas fa-trash"></i></button>
               </div>
             </td>
           </tr>`;
@@ -6217,7 +6217,12 @@ class ServerPanelApp {
     this.showModal('cron-output-modal');
   }
 
-  async deleteSafeCronJob(jobId, name) {
+  async deleteSafeCronJob(jobId) {
+    // See deleteCronJob's comment above — looked up by id rather than
+    // passed through the onclick string, since cron job name has no
+    // server-side character restriction.
+    const job = (this._safeCronJobs || []).find(j => j.id === jobId);
+    const name = job ? job.name : `#${jobId}`;
     if (!confirm(`Delete cron job "${name}"?`)) return;
     try {
       const res = await fetch(`/api/cron/user-jobs/${jobId}`, { method: 'DELETE' });
@@ -6259,7 +6264,7 @@ class ServerPanelApp {
                 <button class="btn btn-icon btn-sm" title="Run Now" onclick="app.runCronJobNow(${job.id})"><i class="fas fa-play"></i></button>
                 <button class="btn btn-icon btn-sm" title="View Output" onclick="app.showCronOutput(${job.id})"><i class="fas fa-align-left"></i></button>
                 <button class="btn btn-icon btn-sm" title="Edit" onclick="app.showEditCronModal(${job.id})"><i class="fas fa-pencil-alt"></i></button>
-                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteCronJob(${job.id}, '${this.escapeHtml(job.name)}')"><i class="fas fa-trash"></i></button>
+                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteCronJob(${job.id})"><i class="fas fa-trash"></i></button>
               </div>
             </td>
           </tr>`;
@@ -6347,7 +6352,23 @@ class ServerPanelApp {
     this.showModal('cron-output-modal');
   }
 
-  async deleteCronJob(jobId, name) {
+  async deleteCronJob(jobId) {
+    // Looked up by id rather than passed through the button's onclick
+    // string — a cron job's `name` has no character restriction
+    // server-side, so embedding it directly in an onclick="...(id,
+    // '...')" attribute (even HTML-entity-escaped) is exploitable: HTML
+    // entity decoding happens before the JS engine parses the attribute,
+    // so an escaped apostrophe decodes right back into a real one and
+    // terminates the string literal early, letting arbitrary injected JS
+    // run as a separate statement the moment this button is clicked. Every
+    // other delete-button onclick in this file follows the same
+    // "id only, look the display value up from cached data" pattern now,
+    // for the same reason, even where the field happens to be
+    // server-side-restricted enough to not currently reach this — see the
+    // audit note this fix shipped with for the one field (cron job name)
+    // that was actually exploitable.
+    const job = (this._cronJobs || []).find(j => j.id === jobId);
+    const name = job ? job.name : `#${jobId}`;
     if (!confirm(`Delete cron job "${name}"?`)) return;
     try {
       const res = await fetch(`/api/cron/${jobId}`, { method: 'DELETE' });
