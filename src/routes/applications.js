@@ -264,7 +264,18 @@ router.get('/catalog', requirePermission('apps:read'), async (req, res) => {
 // Get installed applications
 router.get('/installed', requirePermission('apps:read'), async (req, res) => {
   try {
-    const installations = await database('installed_applications').select('*').orderBy('installed_at', 'desc');
+    // Matches the ownership-filter pattern every sibling list endpoint uses
+    // (domains.js, ssl.js, email.js, backups.js) — this route previously
+    // had none at all, so any apps:read holder (granted to "user" and
+    // "viewer" by default) could enumerate every tenant's install_path,
+    // domain, and config (which holds provisioned DB credentials in
+    // plaintext for apps that requested one). The per-ID routes below
+    // already gated this correctly via canAccessInstallation() — only the
+    // list route was missed.
+    const isAdmin = req.user.role === 'admin';
+    const query = database('installed_applications').select('*').orderBy('installed_at', 'desc');
+    if (!isAdmin) query.where('installed_by', req.user.id);
+    const installations = await query;
 
     const installedApps = installations.map(installation => {
       const catalogApp = APPLICATION_CATALOG[installation.app_id];

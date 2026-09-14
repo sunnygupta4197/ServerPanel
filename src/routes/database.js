@@ -5,6 +5,7 @@ const fs = require('fs').promises;
 const fsSync = require('fs');
 const zlib = require('zlib');
 const path = require('path');
+const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
 const { body, param, query, validationResult } = require('express-validator');
 const { requireRole, requirePermission } = require('../middleware/authMiddleware');
@@ -18,6 +19,15 @@ const SENSITIVE_TABLES = new Set([
   'users', 'api_keys', 'token_blacklist', 'ssl_certificates',
   'email_accounts', 'installed_applications', 'sessions'
 ]);
+
+// SQL identifiers are case-insensitive in both MySQL (on the default,
+// case-insensitive collation) and SQLite, but a plain Set.has() is not —
+// `SENSITIVE_TABLES.has('Users')` returns false even though `GET
+// /tables/Users/data` resolves to the exact same table as `users`. Compare
+// lowercased on both sides so a differently-cased request can't bypass this.
+function isSensitiveTable(tableName) {
+  return SENSITIVE_TABLES.has(String(tableName).toLowerCase());
+}
 
 // Runs a DB-client CLI tool (mysqldump/pg_dump/mysql/psql) via argv array
 // (no shell), passing the password through an env var instead of on the
@@ -34,8 +44,23 @@ function runDbClient(bin, args, { env = {}, stdin, stdoutPath } = {}) {
       code === 0 ? resolve() : reject(new Error(`${bin} exited with code ${code}: ${stderr.slice(0, 500)}`));
     });
 
-    if (stdoutPath) child.stdout.pipe(fsSync.createWriteStream(stdoutPath));
-    if (stdin) stdin.pipe(child.stdin);
+    // .pipe() does not forward 'error' events between streams — an
+    // unlistened error on either side (a full disk writing stdoutPath, a
+    // corrupted .gz decompressing on its way into stdin during restore)
+    // is an unhandled exception that crashes the entire process, not just
+    // this request — the same bug class already fixed in files.js's
+    // /extract and /archive, missed here since this file predates that fix.
+    if (stdoutPath) {
+      const out = fsSync.createWriteStream(stdoutPath);
+      out.on('error', reject);
+      child.stdout.on('error', reject);
+      child.stdout.pipe(out);
+    }
+    if (stdin) {
+      stdin.on('error', reject);
+      child.stdin.on('error', reject);
+      stdin.pipe(child.stdin);
+    }
   });
 }
 
@@ -210,7 +235,7 @@ router.get('/tables/:tableName/structure',
       }
 
       const { tableName } = req.params;
-      if (SENSITIVE_TABLES.has(tableName)) {
+      if (isSensitiveTable(tableName)) {
         return res.status(403).json({ success: false, message: 'This table cannot be inspected through the database browser' });
       }
       const dbConfig = database.client.config;
@@ -294,7 +319,7 @@ router.get('/tables/:tableName/data',
       }
 
       const { tableName } = req.params;
-      if (SENSITIVE_TABLES.has(tableName)) {
+      if (isSensitiveTable(tableName)) {
         return res.status(403).json({ success: false, message: 'This table cannot be inspected through the database browser' });
       }
       const { page = 1, limit = 50, orderBy, orderDirection = 'asc' } = req.query;
@@ -380,7 +405,24 @@ router.post('/backup',
         await runDbClient('pg_dump', args, { env: { PGPASSWORD: dbConfig.password }, stdoutPath: backupPath });
       } else if (client === 'sqlite3') {
         const dbFile = dbConfig.filename || path.join(__dirname, '../data/serverpanel.db');
-        await runDbClient('sqlite3', [dbFile, '.dump'], { stdoutPath: backupPath });
+        if (dbFile === ':memory:') {
+          // The sqlite3 CLI treats a literal ":memory:" argument as its
+          // OWN brand-new, empty in-memory database — completely
+          // disconnected from this process's live Knex connection.
+          // Spawning `sqlite3 :memory: .dump` against it silently produced
+          // an empty-but-"successful" backup. Materialize the live
+          // in-memory DB to a real temp file first (the same technique
+          // backupService.js uses), dump that file, then discard it.
+          const tempFile = path.join(config.SYSTEM.TEMP_DIR, `sp-db-backup-${crypto.randomBytes(6).toString('hex')}.sqlite`);
+          try {
+            await database.raw('VACUUM INTO ?', [tempFile]);
+            await runDbClient('sqlite3', [tempFile, '.dump'], { stdoutPath: backupPath });
+          } finally {
+            await fs.unlink(tempFile).catch(() => {});
+          }
+        } else {
+          await runDbClient('sqlite3', [dbFile, '.dump'], { stdoutPath: backupPath });
+        }
       }
 
       // Compress via Node's built-in zlib instead of shelling out to `gzip`
@@ -487,6 +529,22 @@ router.post('/restore',
       const dbConfig = database.client.config.connection;
       const client = database.client.config.client;
       const isGz = resolvedPath.endsWith('.gz');
+
+      // Spawning the external sqlite3 CLI against a literal ":memory:"
+      // path opens an entirely separate, throwaway in-memory database in
+      // that child process — completely disconnected from this app's live
+      // Knex connection. The restore would silently do nothing to the
+      // app's actual data while still reporting success. Unlike
+      // backupService.js's restore (which works against the live
+      // connection directly via ATTACH), this route just feeds a raw
+      // external process, so there's no equivalent live-restore path here
+      // — refuse cleanly instead of faking success.
+      if (client === 'sqlite3' && (dbConfig.filename || '') === ':memory:') {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot restore into a :memory: database through this endpoint (there is nothing durable to restore into). Use the Backups page instead.'
+        });
+      }
 
       // Feeds the dump straight into the client's stdin — gunzipped
       // in-stream via zlib if needed — instead of a shell `gunzip -c | ...`

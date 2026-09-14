@@ -977,12 +977,26 @@ router.get('/search',
 // The app's own install directory (src/routes -> src -> repo root) — never
 // let the file manager expose the panel's own secrets/DB/logs/VCS history,
 // regardless of what HOME_DIR/WEB_ROOT the operator configured.
+//
+// config.PATHS.BACKUPS/CERTIFICATES/CONFIGS are included here deliberately:
+// backupService.js's "full"/"database" backups dump the entire operational
+// DB (every user's password hash, 2FA secret, SSL private key, API keys)
+// into a .tar.gz under PATHS.BACKUPS, and acmeService.js's real account
+// private key lives under PATHS.CERTIFICATES — before this fix, any
+// files:read holder (granted to both the "user" and "viewer" roles by
+// default) could browse straight to and download those archives/keys
+// through the ordinary file manager, since nothing blocked those
+// directories. Verified live: a real backup archive and the real ACME
+// account key were both reachable this way prior to this fix.
 const APP_ROOT = path.resolve(__dirname, '..', '..');
 const SENSITIVE_APP_PATHS = [
   path.join(APP_ROOT, '.env'),
   path.join(APP_ROOT, 'data'),
   path.join(APP_ROOT, 'logs'),
-  path.join(APP_ROOT, '.git')
+  path.join(APP_ROOT, '.git'),
+  config.PATHS.BACKUPS,
+  config.PATHS.CERTIFICATES,
+  config.PATHS.CONFIGS
 ];
 
 // Broad OS-level directories that should never be reachable through the
@@ -1009,7 +1023,17 @@ const FORBIDDEN_ROOTS = process.platform === 'win32'
 
 function isPathSafe(targetPath) {
   const resolved = path.resolve(targetPath);
-  const isWithin = (base) => resolved === base || resolved.startsWith(base + path.sep);
+  // Windows filesystems are case-insensitive/case-preserving — path.resolve()
+  // does NOT normalize case, so comparing resolved paths byte-for-byte
+  // against the denylist let a differently-cased path (e.g.
+  // "C:\Windows\System32\Config" or "e:\projects\serverpanel\Data") sail
+  // straight past every check below on this deployment's actual OS. Compare
+  // case-insensitively on Windows, case-sensitively everywhere else.
+  const compareBase = config.SYSTEM.IS_WINDOWS ? resolved.toLowerCase() : resolved;
+  const isWithin = (base) => {
+    const compareTarget = config.SYSTEM.IS_WINDOWS ? base.toLowerCase() : base;
+    return compareBase === compareTarget || compareBase.startsWith(compareTarget + path.sep);
+  };
 
   if (SENSITIVE_APP_PATHS.some(isWithin)) return false;
   if (FORBIDDEN_ROOTS.some(isWithin)) return false;
