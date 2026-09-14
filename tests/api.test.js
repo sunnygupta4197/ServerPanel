@@ -1,6 +1,7 @@
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const path = require('path');
 const ServerPanelApp = require('../src/app');
 const database = require('../src/config/database');
 
@@ -753,6 +754,19 @@ describe('Integration Tests', () => {
     test('should create, list, modify, and delete files', async () => {
       const testPath = '/tmp/serverpanel-test';
 
+      // Idempotent guard: mkdir below is non-recursive, so it throws EEXIST
+      // (surfaced as a 500) if this path survived a previous run that
+      // failed/was interrupted before reaching the step-8 cleanup delete —
+      // this actually happened mid-session and silently broke every
+      // subsequent run until traced back to leftover E:\tmp\serverpanel-test
+      // rather than genuine flakiness. Clearing it first makes the test
+      // resilient to its own prior failures instead of depending on every
+      // run completing cleanly.
+      await request(app)
+        .delete('/api/files/delete')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ path: testPath, recursive: true });
+
       // 1. Create directory
       await request(app)
         .post('/api/files/mkdir')
@@ -766,7 +780,13 @@ describe('Integration Tests', () => {
         .set('Authorization', `Bearer ${adminToken}`)
         .expect(200);
 
-      expect(listResponse.body.data.currentPath).toBe(testPath);
+      // The server resolves the given path with path.resolve() before
+      // returning it (see files.js's isPathSafe/mkdir), which normalizes a
+      // POSIX-style "/tmp/..." literal to a drive-relative path on Windows
+      // (e.g. "E:\tmp\...") — compare against the same resolution instead
+      // of the literal string, so this test isn't tied to running on a
+      // POSIX host.
+      expect(listResponse.body.data.currentPath).toBe(path.resolve(testPath));
 
       // 3. Create a file
       const testFile = `${testPath}/test.txt`;
@@ -830,6 +850,12 @@ describe('Integration Tests', () => {
   });
 
   describe('System Monitoring Workflow', () => {
+    // Jest's 5000ms default has been intermittently too tight for this one:
+    // /api/system/info fans out several systeminformation calls (cpu, mem,
+    // fsSize, networkInterfaces, system) that have been independently
+    // measured taking 1.5-2s+ each under load (see system.js's own `safe()`
+    // 3000ms-per-call race) — several of those serialized/contended under a
+    // busy machine can exceed 5s even though nothing is actually hung.
     test('should retrieve comprehensive system information', async () => {
       // Get system info
       const infoResponse = await request(app)
@@ -858,7 +884,7 @@ describe('Integration Tests', () => {
 
       expect(processResponse.body.data.processes).toBeInstanceOf(Array);
       expect(processResponse.body.data.total).toBeGreaterThan(0);
-    });
+    }, 20000);
   });
 
   describe('User Management Workflow', () => {

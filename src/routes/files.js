@@ -13,6 +13,7 @@ const { body, param, query, validationResult } = require('express-validator');
 const logger = require('../config/logger');
 const config = require('../config/config');
 const broadcast = require('../sockets/broadcast');
+const database = require('../config/database');
 
 const execFileAsync = promisify(execFile);
 
@@ -25,10 +26,10 @@ const execFileAsync = promisify(execFile);
 // isPathSafe would normally run). Both MUST be validated here directly;
 // there is no later chokepoint that sees them before the file is written.
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
+  destination: async (req, file, cb) => {
     const requestedPath = req.body.path || config.UPLOAD.UPLOAD_PATH;
     const resolved = path.resolve(requestedPath);
-    if (!isPathSafe(resolved)) {
+    if (!(await isPathAllowedForUser(resolved, req.user))) {
       return cb(new Error('Access denied to this directory'));
     }
     cb(null, resolved);
@@ -84,11 +85,23 @@ router.get('/browse',
 
       const showHidden = req.query.showHidden === 'true';
 
-      // Default to home dir; fall back to uploads if it doesn't exist
-      let targetPath = req.query.path || config.SYSTEM.HOME_DIR || config.UPLOAD.UPLOAD_PATH;
+      // Default to home dir; fall back to uploads if it doesn't exist. For
+      // a non-admin, os.homedir() (HOME_DIR) is the server operator's own
+      // home directory, not anything that account should ever land on —
+      // default to their own first domain instead, same fallback-to-uploads
+      // if they own none yet.
+      let targetPath = req.query.path;
+      if (!targetPath) {
+        if (req.user.role === 'admin') {
+          targetPath = config.SYSTEM.HOME_DIR || config.UPLOAD.UPLOAD_PATH;
+        } else {
+          const ownDomain = await database('domains').where('user_id', req.user.id).first();
+          targetPath = ownDomain ? ownDomain.document_root : config.UPLOAD.UPLOAD_PATH;
+        }
+      }
       let safePath = path.resolve(targetPath);
 
-      if (!isPathSafe(safePath)) {
+      if (!(await isPathAllowedForUser(safePath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to this directory'
@@ -175,8 +188,8 @@ router.get('/read',
 
       const filePath = path.resolve(req.query.path);
       const encoding = req.query.encoding || 'utf8';
-      
-      if (!isPathSafe(filePath)) {
+
+      if (!(await isPathAllowedForUser(filePath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to this file'
@@ -184,7 +197,7 @@ router.get('/read',
       }
 
       const stats = await fs.stat(filePath);
-      
+
       if (stats.isDirectory()) {
         return res.status(400).json({
           success: false,
@@ -244,8 +257,8 @@ router.post('/write',
 
       const { path: filePath, content, encoding = 'utf8', backup = true } = req.body;
       const safePath = path.resolve(filePath);
-      
-      if (!isPathSafe(safePath)) {
+
+      if (!(await isPathAllowedForUser(safePath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to this file'
@@ -335,8 +348,8 @@ router.get('/download',
       }
 
       const filePath = path.resolve(req.query.path);
-      
-      if (!isPathSafe(filePath)) {
+
+      if (!(await isPathAllowedForUser(filePath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to this file'
@@ -344,7 +357,7 @@ router.get('/download',
       }
 
       const stats = await fs.stat(filePath);
-      
+
       if (stats.isDirectory()) {
         return res.status(400).json({
           success: false,
@@ -392,8 +405,8 @@ router.post('/mkdir',
 
       const { path: dirPath, recursive = false } = req.body;
       const safePath = path.resolve(dirPath);
-      
-      if (!isPathSafe(safePath)) {
+
+      if (!(await isPathAllowedForUser(safePath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to this location'
@@ -440,8 +453,8 @@ router.delete('/delete',
 
       const { path: targetPath, recursive = false } = req.body;
       const safePath = path.resolve(targetPath);
-      
-      if (!isPathSafe(safePath)) {
+
+      if (!(await isPathAllowedForUser(safePath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to this location'
@@ -502,8 +515,8 @@ router.post('/move',
       const { source, destination } = req.body;
       const sourcePath = path.resolve(source);
       const destPath = path.resolve(destination);
-      
-      if (!isPathSafe(sourcePath) || !isPathSafe(destPath)) {
+
+      if (!(await isPathAllowedForUser(sourcePath, req.user)) || !(await isPathAllowedForUser(destPath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to one or more paths'
@@ -512,7 +525,7 @@ router.post('/move',
 
       // Ensure destination directory exists
       await fs.mkdir(path.dirname(destPath), { recursive: true });
-      
+
       await fs.rename(sourcePath, destPath);
       
       logger.info(`Moved by ${req.user.username}: ${sourcePath} -> ${destPath}`);
@@ -557,8 +570,8 @@ router.post('/copy',
       const { source, destination } = req.body;
       const sourcePath = path.resolve(source);
       const destPath = path.resolve(destination);
-      
-      if (!isPathSafe(sourcePath) || !isPathSafe(destPath)) {
+
+      if (!(await isPathAllowedForUser(sourcePath, req.user)) || !(await isPathAllowedForUser(destPath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to one or more paths'
@@ -567,7 +580,7 @@ router.post('/copy',
 
       // Ensure destination directory exists
       await fs.mkdir(path.dirname(destPath), { recursive: true });
-      
+
       const stats = await fs.stat(sourcePath);
       
       if (stats.isDirectory()) {
@@ -618,8 +631,8 @@ router.post('/permissions',
 
       const { path: targetPath, mode, recursive = false } = req.body;
       const safePath = path.resolve(targetPath);
-      
-      if (!isPathSafe(safePath)) {
+
+      if (!(await isPathAllowedForUser(safePath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to this location'
@@ -687,7 +700,7 @@ router.post('/archive',
       // Ensure all paths are safe
       const safePaths = paths.map(p => path.resolve(p));
       for (const safePath of safePaths) {
-        if (!isPathSafe(safePath)) {
+        if (!(await isPathAllowedForUser(safePath, req.user))) {
           return res.status(403).json({
             success: false,
             message: 'Access denied to one or more paths'
@@ -788,8 +801,8 @@ router.post('/extract',
       const { archivePath, destinationPath } = req.body;
       const safeArchivePath = path.resolve(archivePath);
       const safeDestPath = path.resolve(destinationPath);
-      
-      if (!isPathSafe(safeArchivePath) || !isPathSafe(safeDestPath)) {
+
+      if (!(await isPathAllowedForUser(safeArchivePath, req.user)) || !(await isPathAllowedForUser(safeDestPath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to one or more paths'
@@ -870,15 +883,27 @@ router.get('/search',
       }
 
       const {
-        path: searchPath = config.SYSTEM.WEB_ROOT,
         query: searchQuery,
         type = 'both',
         maxResults = 100
       } = req.query;
-      
+
+      // WEB_ROOT holds every tenant's domain side by side — an
+      // appropriate default only for admin; a non-admin defaults to their
+      // own first domain instead, same as /browse.
+      let searchPath = req.query.path;
+      if (!searchPath) {
+        if (req.user.role === 'admin') {
+          searchPath = config.SYSTEM.WEB_ROOT;
+        } else {
+          const ownDomain = await database('domains').where('user_id', req.user.id).first();
+          searchPath = ownDomain ? ownDomain.document_root : config.UPLOAD.UPLOAD_PATH;
+        }
+      }
+
       const safePath = path.resolve(searchPath);
-      
-      if (!isPathSafe(safePath)) {
+
+      if (!(await isPathAllowedForUser(safePath, req.user))) {
         return res.status(403).json({
           success: false,
           message: 'Access denied to search path'
@@ -1040,6 +1065,39 @@ function isPathSafe(targetPath) {
   if (/[\\/]\.ssh([\\/]|$)/i.test(resolved)) return false;
 
   return true;
+}
+
+// isPathSafe() alone is a host-wide denylist — correct for admin (this is
+// deliberately a cPanel-style "manage my whole server" tool for that role,
+// per the FORBIDDEN_ROOTS comment above) but not for "user"/"viewer", which
+// are granted the exact same files:read/files:write permission strings (see
+// permissions.js) despite representing individual hosting customers on a
+// shared box. Without this, any such account could browse/read/write any
+// other customer's domain files, or any other host path outside the narrow
+// denylist — isPathSafe blocks a handful of OS/app-secret paths, not
+// everything that isn't the caller's own. Every route below must use this,
+// not isPathSafe directly, wherever the path came from request input.
+//
+// Scoped to the caller's own domains.document_root trees (the same
+// ownership boundary every other resource in this app — DNS, email, FTP,
+// cron, customer DBs — already enforces via domain.user_id), plus the
+// shared UPLOAD_PATH scratch area every file:write holder can already reach
+// as the default upload/browse-fallback destination regardless of role.
+async function isPathAllowedForUser(resolvedPath, user) {
+  if (!isPathSafe(resolvedPath)) return false;
+  if (!user || user.role === 'admin') return true;
+
+  const compareTarget = config.SYSTEM.IS_WINDOWS ? resolvedPath.toLowerCase() : resolvedPath;
+  const isWithinRoot = (root) => {
+    const resolvedRoot = path.resolve(root);
+    const compareRoot = config.SYSTEM.IS_WINDOWS ? resolvedRoot.toLowerCase() : resolvedRoot;
+    return compareTarget === compareRoot || compareTarget.startsWith(compareRoot + path.sep);
+  };
+
+  if (isWithinRoot(config.UPLOAD.UPLOAD_PATH)) return true;
+
+  const domains = await database('domains').where('user_id', user.id).select('document_root');
+  return domains.some((d) => d.document_root && isWithinRoot(d.document_root));
 }
 
 // Unix critical roots resolve and compare exactly as written ('/', '/etc',
