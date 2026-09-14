@@ -119,6 +119,19 @@ function unregister(jobId) {
   }
 }
 
+// Stops and forgets every currently-registered task without touching the
+// database — used before a full re-registration (see start()'s use after
+// a backup restore) so stale in-memory tasks for jobs a restore removed
+// or deactivated don't keep firing forever. register()/unregister() alone
+// only ever add or replace one job at a time; there was previously no way
+// to reset everything at once.
+function stopAll() {
+  for (const task of registeredTasks.values()) {
+    task.stop();
+  }
+  registeredTasks.clear();
+}
+
 async function start() {
   const jobs = await database('cron_jobs').where('is_active', true);
   for (const job of jobs) {
@@ -127,4 +140,4 @@ async function start() {
   logger.info(`Cron job runner started (${registeredTasks.size} active job(s) registered)`);
 }
 
-module.exports = { start, register, unregister, runJob };
+module.exports = { start, register, unregister, stopAll, runJob };

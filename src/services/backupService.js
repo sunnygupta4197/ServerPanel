@@ -9,6 +9,10 @@ const tar = require('tar');
 const config = require('../config/config');
 const database = require('../config/database');
 const logger = require('../config/logger');
+const ftpService = require('./ftpService');
+const mailService = require('./mailService');
+const dnsService = require('./dnsService');
+const cronJobRunner = require('../jobs/cronJobRunner');
 
 const FILES_ENTRY = 'files';
 const DB_SQL_ENTRY = 'database.sql';
@@ -203,6 +207,55 @@ async function restoreEmailsFrom(jsonPath) {
   });
 }
 
+// Restoring a database (whether the full-DB path or the narrower
+// emails.json path) writes rows for ftp_accounts/email_accounts/
+// email_forwarders/dns_records/cron_jobs straight into the database via
+// a raw transaction — none of the routes that normally call
+// ftpService.syncVsftpdConfig() / mailService.syncMailConfig() /
+// mailService.syncForwarders() / dnsService.syncBindZone() /
+// cronJobRunner.register() on every create/update/delete run here, so
+// without this, a restored account, forwarder, DNS record, or cron job
+// would sit in the app's own database looking right while the real
+// vsftpd/Postfix/Dovecot/BIND config and in-memory cron schedule all
+// still reflect whatever was there right before the restore. Best-effort
+// like every other sync in this codebase — a host with none of those
+// daemons installed just gets the usual "not available" from each.
+async function resyncRealIntegrationsAfterRestore() {
+  try {
+    const ftpAccounts = await database('ftp_accounts').select('*');
+    await ftpService.syncVsftpdConfig(ftpAccounts).catch(err =>
+      logger.warn('Post-restore FTP resync failed:', err.message));
+
+    const emailAccounts = await database('email_accounts').select('*');
+    await mailService.syncMailConfig(emailAccounts).catch(err =>
+      logger.warn('Post-restore mail resync failed:', err.message));
+
+    const forwarders = await database('email_forwarders').select('*');
+    await mailService.syncForwarders(forwarders).catch(err =>
+      logger.warn('Post-restore forwarder resync failed:', err.message));
+
+    const domains = await database('domains').select('*');
+    for (const domain of domains) {
+      const records = await database('dns_records').where('domain_id', domain.id);
+      await dnsService.syncBindZone(domain.domain, records).catch(err =>
+        logger.warn(`Post-restore DNS resync failed for ${domain.domain}:`, err.message));
+    }
+
+    // A restore can add, remove, or change any cron_jobs row out from
+    // under the in-memory schedule — stopAll() + start() rebuilds it
+    // from scratch off whatever the restore actually left in the
+    // database, rather than trying to diff old vs. new registrations.
+    cronJobRunner.stopAll();
+    await cronJobRunner.start();
+  } catch (error) {
+    // Every individual sync above already catches its own errors — this
+    // only catches something unexpected in the orchestration itself (a
+    // bad query, etc.), which the restore having already completed
+    // shouldn't be undone by.
+    logger.error('Post-restore real-integration resync encountered an unexpected error:', error);
+  }
+}
+
 async function restoreBackup({ archivePath, onProgress }) {
   const extractDir = `${archivePath}.restore-${crypto.randomBytes(6).toString('hex')}`;
   const rawTarPath = `${extractDir}.tar`;
@@ -220,18 +273,27 @@ async function restoreBackup({ archivePath, onProgress }) {
     await tar.extract({ file: rawTarPath, cwd: extractDir });
 
     const entries = await fs.readdir(extractDir);
+    let restoredDbState = false;
 
     if (entries.includes(DB_SQLITE_ENTRY)) {
       onProgress?.(50, 'Restoring SQLite database');
       await restoreSqliteFrom(path.join(extractDir, DB_SQLITE_ENTRY));
+      restoredDbState = true;
     } else if (entries.includes(DB_SQL_ENTRY)) {
       onProgress?.(50, 'Restoring database');
       await restoreSqlDumpFrom(path.join(extractDir, DB_SQL_ENTRY));
+      restoredDbState = true;
     }
 
     if (entries.includes(EMAILS_ENTRY)) {
       onProgress?.(70, 'Restoring email accounts and forwarders');
       await restoreEmailsFrom(path.join(extractDir, EMAILS_ENTRY));
+      restoredDbState = true;
+    }
+
+    if (restoredDbState) {
+      onProgress?.(80, 'Reactivating FTP/mail/DNS/cron for restored data');
+      await resyncRealIntegrationsAfterRestore();
     }
 
     if (entries.includes(FILES_ENTRY)) {
