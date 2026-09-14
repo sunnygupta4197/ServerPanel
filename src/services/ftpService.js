@@ -24,11 +24,12 @@
 // isn't complete yet.
 const fs = require('fs').promises;
 const path = require('path');
-const { spawn, execFile } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const bcrypt = require('bcryptjs');
 const config = require('../config/config');
 const logger = require('../config/logger');
+const { generateCryptHash } = require('../utils/cryptHash');
 
 const execFileAsync = promisify(execFile);
 
@@ -81,22 +82,6 @@ async function verifyPassword(password, hash) {
   return bcrypt.compare(password, hash);
 }
 
-function generateCryptHash(password) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('openssl', ['passwd', '-6', '-stdin']);
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      code === 0 ? resolve(stdout.trim()) : reject(new Error(`openssl exited ${code}: ${stderr.slice(0, 300)}`));
-    });
-    child.stdin.write(password);
-    child.stdin.end();
-  });
-}
-
 // Computes the vsftpd_crypt_hash to store alongside the account's bcrypt
 // hash. Returns null (not a throw) when vsftpd support isn't present at
 // all, since there's then no point spending an openssl invocation on a
@@ -125,8 +110,14 @@ async function syncVsftpdConfig(accounts) {
     return { activated: false, reason: support.reason };
   }
 
-  const activeAccounts = accounts.filter(a => a.is_active && a.vsftpd_crypt_hash);
+  // over_quota is real enforcement (see quotaEnforcer.js): an account that
+  // has exceeded quota_mb is excluded from the active credentials db here,
+  // the same way an is_active: false account already was — this app has
+  // no OS-level disk quota to fall back on, so "can no longer log in" is
+  // the actual mechanism that makes quota_mb mean something.
+  const activeAccounts = accounts.filter(a => a.is_active && a.vsftpd_crypt_hash && !a.over_quota);
   const skipped = accounts.filter(a => a.is_active && !a.vsftpd_crypt_hash).map(a => a.username);
+  const overQuota = accounts.filter(a => a.is_active && a.over_quota).map(a => a.username);
 
   try {
     await fs.mkdir(USER_CONF_DIR, { recursive: true });
@@ -158,7 +149,7 @@ async function syncVsftpdConfig(accounts) {
       await fs.writeFile(path.join(USER_CONF_DIR, account.username), confLines.join('\n') + '\n');
     }
 
-    return { activated: true, skipped };
+    return { activated: true, skipped, overQuota };
   } catch (error) {
     logger.warn('FTP: vsftpd config sync failed, account still saved in the app:', error.message);
     return { activated: false, reason: `vsftpd config sync failed: ${error.message}` };

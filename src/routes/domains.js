@@ -5,6 +5,20 @@ const { requirePermission } = require('../middleware/authMiddleware');
 const database = require('../config/database');
 const logger = require('../config/logger');
 const phpService = require('../services/phpService');
+const dnsService = require('../services/dnsService');
+
+// Rewrites domain's zone file from its current dns_records and applies it
+// (best-effort — see dnsService.syncBindZone). Called after any DNS
+// record create/update/delete, mirroring ftp.js's resyncVsftpd() /
+// email.js's resyncMail() pattern: the app's own dns_records rows are
+// always the source of truth regardless of whether BIND is even
+// installed on this host.
+async function resyncDns(domainId) {
+  const domain = await database('domains').where('id', domainId).first();
+  if (!domain) return { activated: false, reason: 'Domain not found' };
+  const records = await database('dns_records').where('domain_id', domainId).orderBy(['type', 'name']);
+  return dnsService.syncBindZone(domain.domain, records);
+}
 
 // List all domains for authenticated user
 router.get('/', requirePermission('domains:read'), async (req, res) => {
@@ -92,8 +106,9 @@ router.post('/', requirePermission('domains:write'),
         { domain_id: id, type: 'TXT', name: domain,        value: 'v=spf1 +a +mx ~all', ttl: 3600, priority: 0 },
       ];
       await database('dns_records').insert(defaultRecords.map(r => ({ ...r, created_at: new Date(), updated_at: new Date() })));
+      const dnsSync = await resyncDns(id);
 
-      logger.info(`Domain ${domain} added by ${req.user.username}`);
+      logger.info(`Domain ${domain} added by ${req.user.username}${dnsSync.activated ? '' : ' (DNS zone not yet activated — see setup instructions)'}`);
       const created = await database('domains').where('id', id).first();
       res.status(201).json({ success: true, message: 'Domain added', data: created });
     } catch (err) {
@@ -207,6 +222,19 @@ router.delete('/:id', requirePermission('domains:write'),
 
 // --- DNS Records ---
 
+// GET /dns/setup-instructions — the one-time manual named.conf include an
+// operator needs to apply for the zones this app generates to actually
+// be served by BIND.
+router.get('/dns/setup-instructions', requirePermission('domains:read'), async (req, res) => {
+  try {
+    const support = await dnsService.detectBindSupport();
+    res.json({ success: true, data: { support, instructions: dnsService.getSetupInstructions() } });
+  } catch (err) {
+    logger.error('Error getting DNS setup instructions:', err);
+    res.status(500).json({ success: false, message: 'Failed to get setup instructions' });
+  }
+});
+
 router.get('/:id/dns', requirePermission('domains:read'),
   [param('id').isInt()],
   async (req, res) => {
@@ -252,8 +280,13 @@ router.post('/:id/dns', requirePermission('domains:write'),
         created_at: new Date(), updated_at: new Date()
       });
 
+      const dnsSync = await resyncDns(domain.id);
       const record = await database('dns_records').where('id', recId).first();
-      res.status(201).json({ success: true, message: 'DNS record added', data: record });
+      res.status(201).json({
+        success: true,
+        message: dnsSync.activated ? 'DNS record added and zone reloaded' : `DNS record added (${dnsSync.reason || 'zone not activated'})`,
+        data: record
+      });
     } catch (err) {
       logger.error('Error adding DNS record:', err);
       res.status(500).json({ success: false, message: 'Failed to add DNS record' });
@@ -280,8 +313,13 @@ router.put('/:id/dns/:recordId', requirePermission('domains:write'),
       if (priority !== undefined) updates.priority = priority;
 
       await database('dns_records').where({ id: req.params.recordId, domain_id: req.params.id }).update(updates);
+      const dnsSync = await resyncDns(domain.id);
       const record = await database('dns_records').where('id', req.params.recordId).first();
-      res.json({ success: true, message: 'DNS record updated', data: record });
+      res.json({
+        success: true,
+        message: dnsSync.activated ? 'DNS record updated and zone reloaded' : `DNS record updated (${dnsSync.reason || 'zone not activated'})`,
+        data: record
+      });
     } catch (err) {
       logger.error('Error updating DNS record:', err);
       res.status(500).json({ success: false, message: 'Failed to update DNS record' });
@@ -302,6 +340,7 @@ router.delete('/:id/dns/:recordId', requirePermission('domains:write'),
         return res.status(403).json({ success: false, message: 'Access denied' });
 
       await database('dns_records').where({ id: req.params.recordId, domain_id: req.params.id }).delete();
+      await resyncDns(domain.id);
       res.json({ success: true, message: 'DNS record deleted' });
     } catch (err) {
       logger.error('Error deleting DNS record:', err);

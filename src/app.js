@@ -49,6 +49,8 @@ const socketHandlers = require('./sockets/socketHandlers');
 const jobQueue = require('./jobs/jobQueue');
 const backupScheduler = require('./jobs/backupScheduler');
 const cronJobRunner = require('./jobs/cronJobRunner');
+const sslRenewalScheduler = require('./jobs/sslRenewalScheduler');
+const quotaEnforcer = require('./jobs/quotaEnforcer');
 const acmeService = require('./services/acmeService');
 const settingsCache = require('./config/settingsCache');
 
@@ -257,6 +259,11 @@ class ServerPanelApp {
     jobQueue.setIO(this.io);
     socketHandlers(this.io);
     backupScheduler.start();
+    // Same reasoning as backupScheduler above — its cron.schedule() callback
+    // doesn't fire until 3am, long after migrations finish, so no
+    // dbInitPromise chaining is needed here either.
+    sslRenewalScheduler.start();
+    quotaEnforcer.start();
 
     // Unlike backupScheduler.start() (which only registers a poller whose
     // callback doesn't run for another minute, by which point migrations

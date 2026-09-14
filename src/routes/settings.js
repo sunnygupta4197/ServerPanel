@@ -11,14 +11,21 @@ const settingsCache = require('../config/settingsCache');
 // authenticated settings:write caller can only ever touch a defined set of
 // app config values, not arbitrary rows in server_configs.
 //
-// email.enabled, notifications.email_alerts, backup.enabled, backup.schedule,
-// and ssl.auto_renew (a global switch, distinct from the real per-certificate
-// auto_renew column ssl_certificates already has) used to be listed here too
-// but had no code path anywhere that read them — nodemailer is an unused
-// dependency (no email-sending code exists at all), and the real backup
-// scheduling feature is the per-row backup_schedules table, not a single
-// global on/off switch. Removed rather than left as settings that silently
-// do nothing when changed.
+// email.enabled, backup.enabled, backup.schedule, and ssl.auto_renew (a
+// global switch, distinct from the real per-certificate auto_renew column
+// ssl_certificates already has) used to be listed here too but had no code
+// path anywhere that read them, and the real backup scheduling feature is
+// the per-row backup_schedules table, not a single global on/off switch.
+// Removed rather than left as settings that silently do nothing when
+// changed.
+//
+// notifications.email_alerts / webhook_url / sms_to_number were removed for
+// the same reason at the time (nodemailer was an unused dependency, no
+// email/webhook/SMS-sending code existed at all) but are back now that
+// notificationDeliveryService.js and monitoringService.js's
+// sendAlertNotifications() actually read them — each channel defaults off/
+// empty via settingsCache's fallback, so a fresh install doesn't start
+// emailing/webhooking/texting anyone until an operator opts in.
 const SETTINGS_SCHEMA = {
   'system.name': { type: 'string' },
   'system.domain': { type: 'string' },
@@ -35,7 +42,10 @@ const SETTINGS_SCHEMA = {
   'logging.retention_days': { type: 'number', min: 1, max: 3650 },
   'backup.retention_days': { type: 'number', min: 1, max: 3650 },
   'ui.items_per_page': { type: 'number', min: 1, max: 500 },
-  'files.max_upload_size': { type: 'number', min: 1 }
+  'files.max_upload_size': { type: 'number', min: 1 },
+  'notifications.email_alerts': { type: 'boolean' },
+  'notifications.webhook_url': { type: 'string' },
+  'notifications.sms_to_number': { type: 'string' }
 };
 
 // Live-update targets: when one of these keys is saved, immediately apply

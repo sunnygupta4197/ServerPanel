@@ -1,11 +1,25 @@
 const express = require('express');
 const router = express.Router();
 const { body, param, validationResult } = require('express-validator');
-const bcrypt = require('bcryptjs');
 const { requirePermission } = require('../middleware/authMiddleware');
 const database = require('../config/database');
 const logger = require('../config/logger');
-const config = require('../config/config');
+const mailService = require('../services/mailService');
+const quotaEnforcer = require('../jobs/quotaEnforcer');
+
+function sanitize(account) {
+  const { password_hash, mail_crypt_hash, ...safe } = account;
+  return safe;
+}
+
+async function resyncMail() {
+  const accounts = await database('email_accounts').select('*');
+  const result = await mailService.syncMailConfig(accounts);
+  await Promise.all(accounts.map(a =>
+    database('email_accounts').where('id', a.id).update({ activated: !!result.activated })
+  ));
+  return result;
+}
 
 // --- Email Accounts ---
 
@@ -23,11 +37,35 @@ router.get('/accounts', requirePermission('email:read'), async (req, res) => {
     if (!isAdmin) query.where('email_accounts.user_id', req.user.id);
 
     const accounts = await query;
-    const safe = accounts.map(({ password_hash, ...rest }) => rest);
-    res.json({ success: true, data: safe });
+    res.json({ success: true, data: accounts.map(sanitize) });
   } catch (err) {
     logger.error('Error listing email accounts:', err);
     res.status(500).json({ success: false, message: 'Failed to list email accounts' });
+  }
+});
+
+// GET /setup-instructions — the one-time manual Postfix/Dovecot config an
+// operator needs to apply for real accounts to actually receive/serve mail.
+router.get('/setup-instructions', requirePermission('email:read'), async (req, res) => {
+  try {
+    const support = await mailService.detectMailServerSupport();
+    res.json({ success: true, data: { support, instructions: mailService.getSetupInstructions() } });
+  } catch (err) {
+    logger.error('Error getting mail setup instructions:', err);
+    res.status(500).json({ success: false, message: 'Failed to get setup instructions' });
+  }
+});
+
+// POST /accounts/check-quotas — on-demand equivalent of quotaEnforcer's
+// 15-minute email pass. Admin-only, same reasoning as ftp.js's version.
+router.post('/accounts/check-quotas', requirePermission('email:write'), async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access denied' });
+  try {
+    await quotaEnforcer.checkEmailQuotas();
+    res.json({ success: true, message: 'Quota check complete' });
+  } catch (err) {
+    logger.error('Error running on-demand email quota check:', err);
+    res.status(500).json({ success: false, message: 'Failed to check quotas' });
   }
 });
 
@@ -57,7 +95,8 @@ router.post('/accounts', requirePermission('email:write'),
       const existing = await database('email_accounts').where({ local_part, domain_id }).first();
       if (existing) return res.status(409).json({ success: false, message: `Email ${address} already exists` });
 
-      const password_hash = await bcrypt.hash(password, config.BCRYPT_ROUNDS);
+      const password_hash = await mailService.hashPassword(password);
+      const mail_crypt_hash = await mailService.computeMailCryptHash(password);
 
       const [id] = await database('email_accounts').insert({
         user_id: req.user.id,
@@ -65,15 +104,28 @@ router.post('/accounts', requirePermission('email:write'),
         local_part,
         domain: domain.domain,
         password_hash,
+        mail_crypt_hash,
+        maildir: mailService.maildirFor({ domain: domain.domain, local_part }),
         quota_mb,
         used_mb: 0,
         is_active: true,
+        activated: false,
         created_at: new Date(),
         updated_at: new Date()
       });
 
-      logger.info(`Email account ${address} created by ${req.user.username}`);
-      res.status(201).json({ success: true, message: 'Email account created', data: { id, address, quota_mb } });
+      const syncResult = await resyncMail();
+      const created = await database('email_accounts').where('id', id).first();
+
+      logger.info(`Email account ${address} created by ${req.user.username}${syncResult.activated ? '' : ' (not yet activated on the mail server — see setup instructions)'}`);
+
+      res.status(201).json({
+        success: true,
+        message: syncResult.activated
+          ? 'Email account created and activated on the mail server'
+          : `Email account created (not yet activated on the mail server: ${syncResult.reason || 'see setup instructions'})`,
+        data: sanitize(created)
+      });
     } catch (err) {
       logger.error('Error creating email account:', err);
       res.status(500).json({ success: false, message: 'Failed to create email account' });
@@ -97,12 +149,22 @@ router.put('/accounts/:id', requirePermission('email:write'),
         return res.status(403).json({ success: false, message: 'Access denied' });
 
       const updates = { updated_at: new Date() };
-      if (req.body.password) updates.password_hash = await bcrypt.hash(req.body.password, config.BCRYPT_ROUNDS);
+      if (req.body.password) {
+        updates.password_hash = await mailService.hashPassword(req.body.password);
+        updates.mail_crypt_hash = await mailService.computeMailCryptHash(req.body.password);
+      }
       if (req.body.quota_mb !== undefined) updates.quota_mb = req.body.quota_mb;
       if (req.body.is_active !== undefined) updates.is_active = req.body.is_active;
 
       await database('email_accounts').where('id', req.params.id).update(updates);
-      res.json({ success: true, message: 'Email account updated' });
+      const syncResult = await resyncMail();
+      const updated = await database('email_accounts').where('id', req.params.id).first();
+
+      res.json({
+        success: true,
+        message: syncResult.activated ? 'Email account updated' : `Email account updated (${syncResult.reason || 'not activated on the mail server'})`,
+        data: sanitize(updated)
+      });
     } catch (err) {
       logger.error('Error updating email account:', err);
       res.status(500).json({ success: false, message: 'Failed to update email account' });
@@ -120,6 +182,7 @@ router.delete('/accounts/:id', requirePermission('email:write'),
         return res.status(403).json({ success: false, message: 'Access denied' });
 
       await database('email_accounts').where('id', req.params.id).delete();
+      await resyncMail();
       logger.info(`Email account ${account.local_part}@${account.domain} deleted by ${req.user.username}`);
       res.json({ success: true, message: 'Email account deleted' });
     } catch (err) {

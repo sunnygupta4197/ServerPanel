@@ -7,6 +7,7 @@ const database = require('../config/database');
 const logger = require('../config/logger');
 const config = require('../config/config');
 const ftpService = require('../services/ftpService');
+const quotaEnforcer = require('../jobs/quotaEnforcer');
 const { isPathSafe, isCriticalSystemPath } = require('./files');
 
 const USERNAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{2,99}$/;
@@ -56,6 +57,22 @@ router.get('/setup-instructions', requirePermission('ftp:read'), async (req, res
   } catch (err) {
     logger.error('Error getting FTP setup instructions:', err);
     res.status(500).json({ success: false, message: 'Failed to get setup instructions' });
+  }
+});
+
+// POST /accounts/check-quotas — runs the same real usage check
+// quotaEnforcer.js does on its 15-minute schedule, on demand. Admin-only
+// since it walks every account's directory tree (a real, potentially
+// non-trivial I/O cost) rather than being scoped to one caller's own
+// accounts.
+router.post('/accounts/check-quotas', requirePermission('ftp:write'), async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access denied' });
+  try {
+    await quotaEnforcer.checkFtpQuotas();
+    res.json({ success: true, message: 'Quota check complete' });
+  } catch (err) {
+    logger.error('Error running on-demand quota check:', err);
+    res.status(500).json({ success: false, message: 'Failed to check quotas' });
   }
 });
 

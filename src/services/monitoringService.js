@@ -5,6 +5,8 @@ const database = require('../config/database');
 const logger = require('../config/logger');
 const config = require('../config/config');
 const { cleanExpiredTokens } = require('../middleware/authMiddleware');
+const settingsCache = require('../config/settingsCache');
+const notificationDeliveryService = require('./notificationDeliveryService');
 
 class MonitoringService extends EventEmitter {
   constructor() {
@@ -340,9 +342,31 @@ class MonitoringService extends EventEmitter {
         await database('notifications').insert(notifications);
       }
 
-      // TODO: Send email notifications
-      // TODO: Send webhook notifications
-      // TODO: Send SMS notifications (if configured)
+      // Each channel below is independently opt-in via settings (all
+      // default off — a fresh install shouldn't start emailing/webhooking/
+      // texting anyone until an operator deliberately configures it) and
+      // independently best-effort: a missing SMTP/webhook/Twilio config
+      // degrades to a logged warning, never a thrown error, so the in-app
+      // notification above (which already succeeded) is never rolled back
+      // over an unrelated channel failing.
+      if (settingsCache.getBoolean('notifications.email_alerts', false)) {
+        await Promise.all(adminUsers.map(async (user) => {
+          const result = await notificationDeliveryService.sendEmailAlert(user.email, alert);
+          if (!result.delivered) logger.warn(`Alert email to ${user.email} not delivered: ${result.reason}`);
+        }));
+      }
+
+      const webhookUrl = settingsCache.getString('notifications.webhook_url', '');
+      if (webhookUrl) {
+        const result = await notificationDeliveryService.sendWebhookAlert(webhookUrl, alert);
+        if (!result.delivered) logger.warn(`Alert webhook not delivered: ${result.reason}`);
+      }
+
+      const smsNumber = settingsCache.getString('notifications.sms_to_number', '');
+      if (smsNumber) {
+        const result = await notificationDeliveryService.sendSmsAlert(smsNumber, alert);
+        if (!result.delivered) logger.warn(`Alert SMS not delivered: ${result.reason}`);
+      }
 
     } catch (error) {
       logger.error('Error sending alert notifications:', error);
