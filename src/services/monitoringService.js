@@ -445,7 +445,11 @@ class MonitoringService extends EventEmitter {
         uptime: uptime,
         alerts: recentAlerts.length,
         criticalAlerts: recentAlerts.filter(alert => alert.severity === 'critical').length,
-        warningAlerts: recentAlerts.filter(alert => alert.severity === 'warning').length
+        // system_alerts.severity's real enum is low/medium/high/critical
+        // (the DB's CHECK constraint) — 'warning' can never occur, since
+        // checkAlerts() below was already fixed earlier to emit 'medium'
+        // for exactly this class of alert. This always evaluated to 0.
+        warningAlerts: recentAlerts.filter(alert => alert.severity === 'medium').length
       };
     } catch (error) {
       logger.error('Error getting health summary:', error);

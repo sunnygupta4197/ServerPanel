@@ -1,6 +1,26 @@
 const logger = require('../config/logger');
 const config = require('../config/config');
 
+// req.body gets logged verbatim below on any error reaching this handler —
+// most routes self-catch and never get here, but the ones that don't
+// (or any future one that forgets to) would otherwise leak a plaintext
+// password/private key/API key straight into the log file. Redact known
+// sensitive field names before logging rather than trusting every route to
+// keep self-catching forever.
+const SENSITIVE_BODY_FIELDS = new Set([
+  'password', 'newPassword', 'currentPassword', 'confirmPassword',
+  'private_key', 'privateKey', 'secret', 'token', 'apiKey', 'api_key'
+]);
+
+function redactSensitiveFields(body) {
+  if (!body || typeof body !== 'object') return body;
+  const redacted = {};
+  for (const [key, value] of Object.entries(body)) {
+    redacted[key] = SENSITIVE_BODY_FIELDS.has(key) ? '[REDACTED]' : value;
+  }
+  return redacted;
+}
+
 // 404 Not Found handler
 const notFound = (req, res, next) => {
   const error = new Error(`Not Found - ${req.originalUrl}`);
@@ -27,7 +47,7 @@ const errorHandler = (err, req, res, next) => {
     ip: req.ip,
     userAgent: req.get('User-Agent'),
     user: req.user ? req.user.username : 'anonymous',
-    body: req.body,
+    body: redactSensitiveFields(req.body),
     params: req.params,
     query: req.query
   });

@@ -4,6 +4,26 @@ const monitoringService = require('../services/monitoringService');
 const { SystemService, systemMonitor } = require('../services/systemService');
 const jobQueue = require('../jobs/jobQueue');
 const broadcast = require('./broadcast');
+const database = require('../config/database');
+
+// The JWT a socket authenticates with only carries `role`, not the user's
+// full permissions array (see app.js's io.use()), so a handler that needs
+// to gate on a specific permission string — not just "authenticated" —
+// has to look the user's stored permissions up. Mirrors requirePermission()
+// in authMiddleware.js: admin bypasses everything, everyone else is
+// checked against their persisted permissions column.
+async function socketHasPermission(socket, permission) {
+  if (socket.userRole === 'admin') return true;
+  try {
+    const user = await database('users').where('id', socket.userId).first();
+    if (!user) return false;
+    const permissions = JSON.parse(user.permissions || '[]');
+    return permissions.includes(permission);
+  } catch (error) {
+    logger.error('Error checking socket permission:', error);
+    return false;
+  }
+}
 
 module.exports = (io) => {
   broadcast.setIO(io);
@@ -184,9 +204,19 @@ module.exports = (io) => {
     });
 
     // Handle alert acknowledgment
-    socket.on('ack_alert', (data) => {
+    //
+    // The REST equivalent (POST /monitoring/alerts/:id/resolve) requires
+    // monitoring:write, which only the admin role holds by default — this
+    // handler previously checked only isAuthenticated, so any "user"/
+    // "viewer" account could acknowledge any alert over the socket despite
+    // being blocked from the identical action via the API.
+    socket.on('ack_alert', async (data) => {
       if (!socket.isAuthenticated) {
         socket.emit('error', { message: 'Authentication required' });
+        return;
+      }
+      if (!(await socketHasPermission(socket, 'monitoring:write'))) {
+        socket.emit('error', { message: 'Permission required: monitoring:write' });
         return;
       }
       const { alertId } = data;

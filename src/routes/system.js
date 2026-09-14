@@ -198,8 +198,14 @@ router.delete('/processes/:pid',
       const { pid } = req.params;
       const { signal = 'SIGTERM' } = req.body;
 
-      // Security check - don't allow killing critical system processes
-      const criticalPids = [0, 1, 2]; // init, kthreadd, etc.
+      // Security check - don't allow killing critical system processes.
+      // 0/1/2 (init, kthreadd, ...) are the Linux-critical PIDs; 4 is
+      // Windows' "System" process (0/System Idle overlaps both). Blocking
+      // the union rather than branching by platform is strictly safer:
+      // Windows never legitimately assigns PIDs 1/2 to a real process
+      // (PIDs there start at 4 and count up), so including them costs
+      // nothing there, while still protecting Windows' actual PID 4.
+      const criticalPids = [0, 1, 2, 4];
       if (criticalPids.includes(parseInt(pid))) {
         return res.status(403).json({
           success: false,
@@ -347,18 +353,36 @@ router.get('/logs/:logType',
       let logFile;
 
       if (config.SYSTEM.IS_WINDOWS) {
-        // Windows Event Log
+        // Windows Event Log — this used to always query -LogName System
+        // regardless of the requested logType, silently mislabeling
+        // apache/nginx/mysql/auth requests as System log content. "auth"
+        // has a real Windows equivalent (the Security log, where login
+        // events are recorded); apache/nginx/mysql don't — those services'
+        // logs are ordinary files whose location varies per install,
+        // unlike the Linux branch's fixed, well-known /var/log paths, so
+        // there's no honest fallback file path to guess here.
+        const windowsEventLogs = { system: 'System', auth: 'Security' };
+        const eventLogName = windowsEventLogs[logType];
+
+        if (!eventLogName) {
+          return res.status(400).json({
+            success: false,
+            message: `${logType} logs are not available through this endpoint on Windows`
+          });
+        }
+
         const { stdout } = await execFileAsync('powershell.exe', [
           '-NoProfile', '-NonInteractive', '-Command',
-          'Get-EventLog -LogName System -Newest ([int]$env:SP_LOG_LINES) | ConvertTo-Json'
-        ], { env: { ...process.env, SP_LOG_LINES: String(lines) } });
-        const events = JSON.parse(stdout);
-        
+          "Get-EventLog -LogName $env:SP_LOG_NAME -Newest ([int]$env:SP_LOG_LINES) | Select-Object TimeGenerated, @{N='EntryType';E={[string]$_.EntryType}}, Source, Message | ConvertTo-Json"
+        ], { env: { ...process.env, SP_LOG_NAME: eventLogName, SP_LOG_LINES: String(lines) } });
+        const events = stdout.trim() ? JSON.parse(stdout) : [];
+        const entries = Array.isArray(events) ? events : [events];
+
         return res.json({
           success: true,
           data: {
             type: logType,
-            entries: events.map(event => ({
+            entries: entries.map(event => ({
               timestamp: event.TimeGenerated,
               level: event.EntryType,
               source: event.Source,

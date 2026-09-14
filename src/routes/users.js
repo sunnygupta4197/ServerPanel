@@ -158,6 +158,18 @@ router.post('/',
 
       const { username, email, password, first_name, last_name, role, permissions, is_active = true } = req.body;
 
+      // Defense in depth: users:write can be granted to a non-admin account
+      // via a custom permissions array — without this check, that account
+      // could create a brand-new user with role:'admin' (a self-made
+      // backdoor account) or hand out an arbitrary permissions array
+      // beyond the role's own defaults. Only a real admin may do either.
+      if (req.user.role !== 'admin' && (role === 'admin' || permissions !== undefined)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only admins can create an admin account or assign a custom permissions array'
+        });
+      }
+
       // Check if username or email already exists
       const existingUser = await database('users')
         .where('username', username)
@@ -271,6 +283,18 @@ router.put('/:id',
         return res.status(400).json({
           success: false,
           message: 'Cannot deactivate your own account'
+        });
+      }
+
+      // Defense in depth: users:write alone (grantable to a non-admin via a
+      // custom permissions array) should let someone update basic profile
+      // fields, not silently double as "can promote any account — including
+      // their own — to admin, or hand out an arbitrary permissions array."
+      // Role and permission-array changes are gated on actually being admin.
+      if (req.user.role !== 'admin' && (role !== undefined || permissions !== undefined)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only admins can change a user\'s role or permissions'
         });
       }
 
@@ -661,14 +685,20 @@ router.get('/:id/sessions',
 // Get user statistics
 router.get('/stats/summary', requirePermission('users:read'), async (req, res) => {
   try {
+    // Double-quoted string literals ("admin") are only string literals by
+    // accident on sqlite/MySQL's default sql_mode — standard SQL (and
+    // Postgres specifically, which this app also supports via the `pg`
+    // client) treats a double-quoted value as an identifier, so this broke
+    // with "column admin does not exist" on Postgres. Single-quoted
+    // literals are portable across all three.
     const stats = await database('users')
       .select(
         database.raw('COUNT(*) as total'),
         database.raw('COUNT(CASE WHEN is_active = true THEN 1 END) as active'),
         database.raw('COUNT(CASE WHEN is_active = false THEN 1 END) as inactive'),
-        database.raw('COUNT(CASE WHEN role = "admin" THEN 1 END) as admins'),
-        database.raw('COUNT(CASE WHEN role = "user" THEN 1 END) as users'),
-        database.raw('COUNT(CASE WHEN role = "viewer" THEN 1 END) as viewers')
+        database.raw("COUNT(CASE WHEN role = 'admin' THEN 1 END) as admins"),
+        database.raw("COUNT(CASE WHEN role = 'user' THEN 1 END) as users"),
+        database.raw("COUNT(CASE WHEN role = 'viewer' THEN 1 END) as viewers")
       )
       .first();
 

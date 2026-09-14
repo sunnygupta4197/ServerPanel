@@ -137,6 +137,18 @@ async function createBackup({ type, name, onProgress }) {
 // closing the shared knex pool (every route holds a reference to that same
 // object) — ATTACHes the backup file and copies table-by-table inside a
 // single transaction so the whole sequence stays pinned to one connection.
+// SQLite doesn't support parameterized identifiers (only parameterized
+// values), and `name` below comes from the backup archive's OWN
+// sqlite_master — i.e. from a file this function's caller doesn't control
+// the contents of (a crafted .tar.gz backup could name a table
+// `foo"; DROP TABLE users; --`). Standard SQL identifier quoting (wrap in
+// double quotes, double any embedded double quote) neutralizes this: the
+// escaped result is always parsed as a single, if oddly-named, identifier
+// token, never as executable SQL.
+function quoteIdentifier(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
+
 async function restoreSqliteFrom(sourcePath) {
   const alias = `restore_${Date.now()}`;
   await database.transaction(async (trx) => {
@@ -146,8 +158,9 @@ async function restoreSqliteFrom(sourcePath) {
         `SELECT name FROM ${alias}.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'knex_%'`
       );
       for (const { name } of tables) {
-        await trx.raw(`DELETE FROM "${name}"`);
-        await trx.raw(`INSERT INTO "${name}" SELECT * FROM ${alias}."${name}"`);
+        const quoted = quoteIdentifier(name);
+        await trx.raw(`DELETE FROM ${quoted}`);
+        await trx.raw(`INSERT INTO ${quoted} SELECT * FROM ${alias}.${quoted}`);
       }
     } finally {
       await trx.raw(`DETACH DATABASE ${alias}`).catch(() => {});

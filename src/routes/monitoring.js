@@ -360,14 +360,24 @@ router.get('/metrics', requirePermission('monitoring:read'), async (req, res) =>
 });
 
 // Get process snapshots
+// Real columns on process_snapshots — unlike every other sortable listing
+// in this codebase, sortBy/order here were passed straight into
+// knex's .orderBy() with no validation at all.
+const PROCESS_SORT_COLUMNS = new Set([
+  'pid', 'name', 'cpu_usage', 'memory_usage', 'memory_bytes', 'user', 'status', 'priority', 'started_at', 'recorded_at'
+]);
+
 router.get('/processes', requirePermission('monitoring:read'), async (req, res) => {
   try {
     const { limit = 100, sortBy = 'cpu_usage', order = 'desc' } = req.query;
-    
+    const safeSortBy = PROCESS_SORT_COLUMNS.has(sortBy) ? sortBy : 'cpu_usage';
+    const safeOrder = order === 'asc' ? 'asc' : 'desc';
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 1000);
+
     const processes = await database('process_snapshots')
       .select('*')
-      .orderBy(sortBy, order)
-      .limit(limit)
+      .orderBy(safeSortBy, safeOrder)
+      .limit(safeLimit)
       .where('recorded_at', '>', new Date(Date.now() - 5 * 60 * 1000)); // Last 5 minutes
 
     res.json({
