@@ -107,7 +107,17 @@ class ServerPanelApp {
           defaultSrc: ["'self'"],
           styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com", "https://fonts.googleapis.com"],
           scriptSrc: ["'self'", "https://cdn.jsdelivr.net"],
-          scriptSrcAttr: ["'unsafe-inline'"],
+          // Was 'unsafe-inline' — every onclick="..."/onchange="..." etc.
+          // inline event-handler attribute in public/js/app.js has been
+          // migrated to a delegated document-level listener reading
+          // data-click/data-change/... attributes instead (see
+          // initializeDelegatedEvents() there), specifically so this could
+          // be tightened. This is what makes the whole vulnerability class
+          // the cron-job-name stored XSS belonged to actually blocked by
+          // the browser now, not just avoided at the one call site that
+          // was exploitable — an inline handler literally cannot execute
+          // regardless of what ends up inside it.
+          scriptSrcAttr: ["'none'"],
           fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com"],
           imgSrc: ["'self'", "data:", "https:"],
           connectSrc: ["'self'", "ws:", "wss:", "https://cdn.jsdelivr.net"],

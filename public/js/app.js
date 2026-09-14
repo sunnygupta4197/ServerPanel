@@ -1,5 +1,23 @@
 // ServerPanel Pro - Main Application JavaScript
 
+// Swaps index.html's two preloaded stylesheets (fonts, Font Awesome) from
+// rel="preload" to rel="stylesheet" — moved here from an inline
+// onload="this.rel='stylesheet'" attribute on each <link>, which CSP's
+// scriptSrcAttr no longer allows (see the CSP change in src/app.js's
+// helmet config). Deliberately does NOT wait for each link's own 'load'
+// event: this script tag sits at the very bottom of <body>, so by the
+// time it runs, the browser has already had the whole rest of the page's
+// parse time to progress the preload fetch in the background — the
+// original swap-on-load pattern exists to avoid render-blocking, which is
+// already achieved by using rel="preload" in the first place; waiting for
+// the event here would risk missing it entirely if the fetch happened to
+// finish before this line runs, leaving the stylesheet stuck at
+// rel="preload" (never applied) for the rest of the page's life.
+['preload-fonts', 'preload-fontawesome'].forEach((id) => {
+  const link = document.getElementById(id);
+  if (link) link.rel = 'stylesheet';
+});
+
 // Maps each Settings tab's form fields to their /api/settings keys.
 const SETTINGS_FIELD_MAP = {
   general: {
@@ -192,9 +210,10 @@ class ServerPanelApp {
     toast.innerHTML = `
       <i class="fas ${icon} toast-icon"></i>
       <div class="toast-content"><p class="toast-message"></p></div>
-      <button class="toast-close" onclick="this.closest('.toast').remove()"><i class="fas fa-times"></i></button>
+      <button class="toast-close"><i class="fas fa-times"></i></button>
     `;
     toast.querySelector('.toast-message').textContent = message;
+    toast.querySelector('.toast-close').addEventListener('click', () => toast.remove());
 
     const container = document.getElementById('toast-container') || document.body;
     container.appendChild(toast);
@@ -349,10 +368,145 @@ class ServerPanelApp {
     }
   }
 
+  // Replaces this app's former onclick="app.method(...)"/onchange="..." inline
+  // HTML-attribute pattern everywhere (see the CSP change in src/app.js's
+  // helmet config removing 'unsafe-inline' from scriptSrcAttr — an
+  // onclick="..." attribute simply never fires once that's gone). Every
+  // interactive element built by this file now carries data-click/
+  // data-change (a method name) plus an optional JSON-encoded
+  // data-click-args/data-change-args instead, dispatched through these two
+  // listeners attached ONCE at the document level — which keeps working
+  // for content that gets replaced via innerHTML on every data reload,
+  // since a delegated listener never needs re-attaching to new elements.
+  //
+  // Why this closes the vulnerability class the cron-job-name XSS (see
+  // that fix's commit) was one instance of, rather than just moving it:
+  // data-* attribute values are read via .dataset as plain strings and
+  // JSON.parse()d — at no point is the value ever handed to something that
+  // parses it as JavaScript syntax, unlike an onclick="...('...')" string,
+  // where the browser's HTML-entity-decode-then-execute-as-JS sequence is
+  // exactly what let an escaped quote decode back into a real one and
+  // break out of the intended string literal.
+  initializeDelegatedEvents() {
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-click]');
+      if (!el) return;
+      if (el.dataset.preventDefault !== undefined) e.preventDefault();
+      this._dispatchDelegated(el, 'click');
+    });
+
+    document.addEventListener('change', (e) => {
+      const el = e.target.closest('[data-change]');
+      if (!el) return;
+      this._dispatchDelegated(el, 'change', e.target);
+    });
+
+    // 'input' fires on every keystroke (live filter boxes) — capture
+    // phase isn't needed, bubbling is enough since these are always
+    // plain text inputs, not something with its own nested focusable
+    // children the event could otherwise get attributed to.
+    document.addEventListener('input', (e) => {
+      const el = e.target.closest('[data-input]');
+      if (!el) return;
+      this._dispatchDelegated(el, 'input', e.target);
+    });
+
+    // Enter-to-submit on a search box — the one former onkeydown="..."
+    // call site (`if (event.key==='Enter') app.searchFiles()`), kept as
+    // its own event type rather than overloading 'input' since only the
+    // Enter key should trigger it, not every keystroke.
+    document.addEventListener('keydown', (e) => {
+      const el = e.target.closest('[data-keydown-enter]');
+      if (!el || e.key !== 'Enter') return;
+      this._dispatchDelegated(el, 'keydownEnter', e.target);
+    });
+  }
+
+  // kind is 'click'/'change'/'input'/'keydownEnter' — reads
+  // data-<kind-kebab>/data-<kind-kebab>-args accordingly (dataset keys are
+  // camelCase; the actual attribute is kebab-case, e.g. keydownEnter ->
+  // data-keydown-enter). eventTarget (passed for every kind except
+  // 'click') lets a call site's args array use the sentinel '__VALUE__' in
+  // place of a literal, substituted with the actual live input/select
+  // value at dispatch time — for the handful of former onchange="..."/
+  // oninput="..." handlers that read `this.value`, which isn't known at
+  // render time. A data-click/data-change/etc. value can be a
+  // comma-separated list of method names (data-click-args then an array
+  // of one args-array per method, in the same order) for the few call
+  // sites that used to run two statements, e.g.
+  // onclick="app.a(); app.b('x');".
+  _dispatchDelegated(el, kind, eventTarget) {
+    const methods = (el.dataset[kind] || '').split(',');
+    let argsList = methods.map(() => []);
+    const raw = el.dataset[`${kind}Args`];
+    if (raw) {
+      try {
+        argsList = JSON.parse(raw);
+      } catch (err) {
+        console.error(`Delegated ${kind} handler: could not parse args for "${el.dataset[kind]}":`, err);
+        return;
+      }
+    }
+    methods.forEach((method, i) => {
+      if (typeof this[method] !== 'function') {
+        console.error(`Delegated ${kind} handler: no such method "${method}"`);
+        return;
+      }
+      let args = argsList[i] || [];
+      if (eventTarget) {
+        args = args.map(a => a === '__VALUE__' ? eventTarget.value : a);
+      }
+      this[method](...args);
+    });
+  }
+
+  // Builds a data-click(+args) attribute pair for a template-literal HTML
+  // string — e.g. `<button ${this.dc('deleteCronJob', job.id)}>` — in
+  // place of the old onclick="app.deleteCronJob(${job.id})". Arguments are
+  // JSON-encoded (correctly handling embedded quotes, unlike naive string
+  // interpolation) and HTML-escaped for the attribute-value context, which
+  // — unlike escaping a value destined for an onclick string — is actually
+  // the correct and sufficient escaping for this context, since the
+  // decoded result is only ever used as data (JSON.parse'd), never
+  // executed as code.
+  dc(method, ...args) {
+    return `data-click="${method}" data-click-args="${this.escapeHtml(JSON.stringify([args]))}"`;
+  }
+
+  // For the handful of former onclick="app.a(); app.b('x');" (two
+  // statements) call sites — pass [['methodA', ...argsA], ['methodB', ...argsB]].
+  dcMulti(...calls) {
+    const methods = calls.map(c => c[0]).join(',');
+    const argsList = calls.map(c => c.slice(1));
+    return `data-click="${methods}" data-click-args="${this.escapeHtml(JSON.stringify(argsList))}"`;
+  }
+
+  // Same as dc() but for delegated 'change' events (onchange="..." call
+  // sites) — pass '__VALUE__' as a placeholder argument where the old
+  // handler read `this.value`.
+  dchg(method, ...args) {
+    return `data-change="${method}" data-change-args="${this.escapeHtml(JSON.stringify([args]))}"`;
+  }
+
+  // Same as dc() but for delegated 'input' events (oninput="..." call
+  // sites, live filter boxes) — pass '__VALUE__' as a placeholder argument
+  // where the old handler read `this.value`.
+  di(method, ...args) {
+    return `data-input="${method}" data-input-args="${this.escapeHtml(JSON.stringify([args]))}"`;
+  }
+
+  // Same as dc() but for the one former
+  // onkeydown="if(event.key==='Enter') app.method()" call site.
+  dke(method, ...args) {
+    return `data-keydown-enter="${method}" data-keydown-enter-args="${this.escapeHtml(JSON.stringify([args]))}"`;
+  }
+
   // Initialize event listeners
   initializeEventListeners() {
     console.log('Event listeners initialized');
-    
+
+    this.initializeDelegatedEvents();
+
     // Navigation links
     const navLinks = document.querySelectorAll('.nav-link');
     navLinks.forEach(link => {
@@ -984,7 +1138,7 @@ class ServerPanelApp {
         <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
           <i class="fas fa-exclamation-triangle" style="font-size: 3rem; color: var(--danger); margin-bottom: 1rem;"></i>
           <p>${message}</p>
-          <button class="btn btn-primary" onclick="app.loadServicesData()" style="margin-top: 1rem;">
+          <button class="btn btn-primary" ${this.dc('loadServicesData')} style="margin-top: 1rem;">
             <i class="fas fa-refresh"></i> Retry
           </button>
         </div>
@@ -1000,7 +1154,7 @@ class ServerPanelApp {
 
   showFilesError(message) {
     const tbody = document.querySelector('.file-list tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--danger);"><i class="fas fa-exclamation-triangle" style="margin-right:0.5rem;"></i>${message} <button class="btn btn-sm" style="margin-left:0.5rem;" onclick="app.loadFilesData()">Retry</button></td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--danger);"><i class="fas fa-exclamation-triangle" style="margin-right:0.5rem;"></i>${message} <button class="btn btn-sm" style="margin-left:0.5rem;" ${this.dc('loadFilesData')}>Retry</button></td></tr>`;
     this.showToast(message, 'error');
   }
 
@@ -1025,7 +1179,7 @@ class ServerPanelApp {
         <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
           <i class="fas fa-exclamation-triangle" style="font-size: 3rem; color: var(--danger); margin-bottom: 1rem;"></i>
           <p>${message}</p>
-          <button class="btn btn-primary" onclick="app.loadUsersData()" style="margin-top: 1rem;">
+          <button class="btn btn-primary" ${this.dc('loadUsersData')} style="margin-top: 1rem;">
             <i class="fas fa-refresh"></i> Retry
           </button>
         </div>
@@ -1165,7 +1319,7 @@ class ServerPanelApp {
             </div>
           </div>
           <div style="text-align: center;">
-            <button class="btn btn-primary" onclick="app.navigateToPage('monitoring')" style="font-size: 0.875rem; padding: 0.5rem 1rem;">
+            <button class="btn btn-primary" ${this.dc('navigateToPage', 'monitoring')} style="font-size: 0.875rem; padding: 0.5rem 1rem;">
               <i class="fas fa-chart-line"></i> View Details
             </button>
           </div>
@@ -1226,10 +1380,10 @@ class ServerPanelApp {
             </div>
           </div>
           <div style="display: flex; gap: 0.5rem;">
-            <button class="btn btn-primary" onclick="app.navigateToPage('monitoring')" style="flex: 1; font-size: 0.875rem; padding: 0.5rem;">
+            <button class="btn btn-primary" ${this.dc('navigateToPage', 'monitoring')} style="flex: 1; font-size: 0.875rem; padding: 0.5rem;">
               <i class="fas fa-chart-line"></i> Monitoring
             </button>
-            <button class="btn btn-primary" onclick="app.navigateToPage('services')" style="flex: 1; font-size: 0.875rem; padding: 0.5rem;">
+            <button class="btn btn-primary" ${this.dc('navigateToPage', 'services')} style="flex: 1; font-size: 0.875rem; padding: 0.5rem;">
               <i class="fas fa-cogs"></i> Services
             </button>
           </div>
@@ -1455,7 +1609,7 @@ class ServerPanelApp {
         <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
           <i class="fas fa-exclamation-triangle" style="font-size: 2rem; color: var(--danger); margin-bottom: 1rem;"></i>
           <p>Failed to load process data</p>
-          <button class="btn btn-primary" onclick="app.showCpuProcessesModal(); app.closeModal('cpu-processes-modal');" style="margin-top: 1rem;">
+          <button class="btn btn-primary" ${this.dcMulti(['showCpuProcessesModal'], ['closeModal', 'cpu-processes-modal'])} style="margin-top: 1rem;">
             <i class="fas fa-refresh"></i> Retry
           </button>
         </div>
@@ -1597,7 +1751,7 @@ class ServerPanelApp {
         <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
           <i class="fas fa-exclamation-triangle" style="font-size: 2rem; color: var(--danger); margin-bottom: 1rem;"></i>
           <p>Failed to load memory data</p>
-          <button class="btn btn-primary" onclick="app.showMemoryProcessesModal(); app.closeModal('memory-processes-modal');" style="margin-top: 1rem;">
+          <button class="btn btn-primary" ${this.dcMulti(['showMemoryProcessesModal'], ['closeModal', 'memory-processes-modal'])} style="margin-top: 1rem;">
             <i class="fas fa-refresh"></i> Retry
           </button>
         </div>
@@ -1731,7 +1885,7 @@ class ServerPanelApp {
         <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
           <i class="fas fa-exclamation-triangle" style="font-size: 2rem; color: var(--danger); margin-bottom: 1rem;"></i>
           <p>Failed to load network data</p>
-          <button class="btn btn-primary" onclick="app.showNetworkConnectionsModal(); app.closeModal('network-connections-modal');" style="margin-top: 1rem;">
+          <button class="btn btn-primary" ${this.dcMulti(['showNetworkConnectionsModal'], ['closeModal', 'network-connections-modal'])} style="margin-top: 1rem;">
             <i class="fas fa-refresh"></i> Retry
           </button>
         </div>
@@ -1871,7 +2025,7 @@ class ServerPanelApp {
         <div style="text-align: center; padding: 3rem; color: var(--text-secondary);">
           <i class="fas fa-exclamation-triangle" style="font-size: 2rem; color: var(--danger); margin-bottom: 1rem;"></i>
           <p>Failed to load disk data</p>
-          <button class="btn btn-primary" onclick="app.showDiskProcessesModal(); app.closeModal('disk-processes-modal');" style="margin-top: 1rem;">
+          <button class="btn btn-primary" ${this.dcMulti(['showDiskProcessesModal'], ['closeModal', 'disk-processes-modal'])} style="margin-top: 1rem;">
             <i class="fas fa-refresh"></i> Retry
           </button>
         </div>
@@ -2336,11 +2490,11 @@ class ServerPanelApp {
           <div class="chart-header">
             <h3 class="chart-title">Advanced System Monitoring</h3>
             <div style="display: flex; gap: 1rem;">
-              <button class="btn" onclick="app.exportMonitoringData()">
+              <button class="btn" ${this.dc('exportMonitoringData')}>
                 <i class="fas fa-download"></i>
                 Export Data
               </button>
-              <button class="btn" onclick="app.configureAlerts()">
+              <button class="btn" ${this.dc('configureAlerts')}>
                 <i class="fas fa-cog"></i>
                 Configure Alerts
               </button>
@@ -2393,8 +2547,8 @@ class ServerPanelApp {
               <label style="color:var(--text-secondary);margin:0;">Alerts enabled</label>
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-              <button class="btn" onclick="app.hideModal('configure-alerts-modal')">Cancel</button>
-              <button class="btn btn-primary" onclick="app.saveAlertConfig()"><i class="fas fa-check"></i> Save</button>
+              <button class="btn" ${this.dc('hideModal', 'configure-alerts-modal')}>Cancel</button>
+              <button class="btn btn-primary" ${this.dc('saveAlertConfig')}><i class="fas fa-check"></i> Save</button>
             </div>
           </div>
         </div>
@@ -2407,7 +2561,7 @@ class ServerPanelApp {
       <div class="page-header">
         <h2><i class="fas fa-cogs" style="color:var(--primary);margin-right:0.5rem;font-size:0.9rem;"></i>Services</h2>
         <div class="page-actions">
-          <button class="btn" onclick="app.refreshServices()"><i class="fas fa-sync-alt"></i> Refresh</button>
+          <button class="btn" ${this.dc('refreshServices')}><i class="fas fa-sync-alt"></i> Refresh</button>
         </div>
       </div>
 
@@ -2442,8 +2596,8 @@ class ServerPanelApp {
         <div style="display:flex;align-items:center;justify-content:space-between;padding:0.75rem 1rem;border-bottom:1px solid var(--border);gap:0.5rem;flex-wrap:wrap;">
           <span class="section-label" style="margin:0;">All Services</span>
           <div style="display:flex;gap:0.5rem;">
-            <input type="text" placeholder="Filter…" style="width:160px;" oninput="app.filterServices(this.value)">
-            <select onchange="app.filterServicesByState(this.value)" style="width:120px;">
+            <input type="text" placeholder="Filter…" style="width:160px;" ${this.di('filterServices', '__VALUE__')}>
+            <select ${this.dchg('filterServicesByState', '__VALUE__')} style="width:120px;">
               <option value="all">All states</option>
               <option value="running">Running</option>
               <option value="stopped">Stopped</option>
@@ -2477,11 +2631,11 @@ class ServerPanelApp {
         <div class="page-actions">
           <input id="file-search-input" type="text" placeholder="Search files…" class="form-control"
                  style="width:200px;padding:0.5rem 0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);"
-                 onkeydown="if(event.key==='Enter') app.searchFiles()">
-          <button class="btn btn-icon btn-sm" title="Search" onclick="app.searchFiles()"><i class="fas fa-search"></i></button>
-          <button class="btn" onclick="app.uploadFile()"><i class="fas fa-upload"></i> Upload</button>
-          <button class="btn" onclick="app.createFolder()"><i class="fas fa-folder-plus"></i> New Folder</button>
-          <button class="btn" onclick="app.archiveCurrentFolder()"><i class="fas fa-file-archive"></i> Archive Folder</button>
+                 ${this.dke('searchFiles')}>
+          <button class="btn btn-icon btn-sm" title="Search" ${this.dc('searchFiles')}><i class="fas fa-search"></i></button>
+          <button class="btn" ${this.dc('uploadFile')}><i class="fas fa-upload"></i> Upload</button>
+          <button class="btn" ${this.dc('createFolder')}><i class="fas fa-folder-plus"></i> New Folder</button>
+          <button class="btn" ${this.dc('archiveCurrentFolder')}><i class="fas fa-file-archive"></i> Archive Folder</button>
         </div>
       </div>
 
@@ -2489,9 +2643,9 @@ class ServerPanelApp {
         <div style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem 0.875rem;border-bottom:1px solid var(--border);gap:0.5rem;flex-wrap:wrap;">
           <div class="path-breadcrumb" id="file-breadcrumb">/</div>
           <div style="display:flex;gap:0.375rem;">
-            <button class="btn btn-icon btn-sm" title="Go up" onclick="app.navigateUp()"><i class="fas fa-arrow-up"></i></button>
-            <button class="btn btn-icon btn-sm" title="Home" onclick="app.goHome()"><i class="fas fa-home"></i></button>
-            <button class="btn btn-icon btn-sm" title="Refresh" onclick="app.loadFilesData()"><i class="fas fa-sync-alt"></i></button>
+            <button class="btn btn-icon btn-sm" title="Go up" ${this.dc('navigateUp')}><i class="fas fa-arrow-up"></i></button>
+            <button class="btn btn-icon btn-sm" title="Home" ${this.dc('goHome')}><i class="fas fa-home"></i></button>
+            <button class="btn btn-icon btn-sm" title="Refresh" ${this.dc('loadFilesData')}><i class="fas fa-sync-alt"></i></button>
           </div>
         </div>
         <div class="file-list" style="max-height:60vh;overflow-y:auto;">
@@ -2513,8 +2667,8 @@ class ServerPanelApp {
           <textarea id="file-editor-content" spellcheck="false"
                     style="width:100%;height:50vh;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);font-family:monospace;font-size:0.8125rem;resize:vertical;"></textarea>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;margin-top:1rem;">
-            <button class="btn" onclick="app.hideModal('file-editor-modal')">Cancel</button>
-            <button class="btn btn-primary" onclick="app.saveFileEdit()"><i class="fas fa-save"></i> Save</button>
+            <button class="btn" ${this.dc('hideModal', 'file-editor-modal')}>Cancel</button>
+            <button class="btn btn-primary" ${this.dc('saveFileEdit')}><i class="fas fa-save"></i> Save</button>
           </div>
         </div>
       </div>
@@ -2529,11 +2683,11 @@ class ServerPanelApp {
             <div style="display:flex;gap:0.5rem;">
               <input id="file-properties-mode" type="text" placeholder="755" maxlength="4" class="form-control"
                      style="width:100px;padding:0.5rem 0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
-              <button class="btn btn-primary" onclick="app.applyFilePermissions()">Apply</button>
+              <button class="btn btn-primary" ${this.dc('applyFilePermissions')}>Apply</button>
             </div>
           </div>
           <div style="display:flex;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('file-properties-modal')">Close</button>
+            <button class="btn" ${this.dc('hideModal', 'file-properties-modal')}>Close</button>
           </div>
         </div>
       </div>
@@ -2652,7 +2806,7 @@ class ServerPanelApp {
           </div>
         </td>
         <td>
-          <button class="btn btn-icon" title="View Process Details" onclick="app.showProcessDetails(${process.pid})">
+          <button class="btn btn-icon" title="View Process Details" ${this.dc('showProcessDetails', process.pid)}>
             <i class="fas fa-info-circle"></i>
           </button>
         </td>
@@ -2701,7 +2855,7 @@ class ServerPanelApp {
       <div style="text-align: center; padding: 2rem;">
         <i class="fas fa-exclamation-triangle" style="color: var(--warning); font-size: 2rem; margin-bottom: 1rem;"></i>
         <p style="color: var(--text-secondary); margin-bottom: 1rem;">${this.escapeHtml(message)}</p>
-        <button class="btn btn-primary" onclick="app.loadActiveProcesses()" style="font-size: 0.875rem;">
+        <button class="btn btn-primary" ${this.dc('loadActiveProcesses')} style="font-size: 0.875rem;">
           <i class="fas fa-sync-alt"></i>
           Try Again
         </button>
@@ -2865,7 +3019,7 @@ class ServerPanelApp {
       <div class="page-header">
         <h2><i class="fas fa-database" style="color:var(--primary);margin-right:0.5rem;font-size:0.9rem;"></i>Database</h2>
         <div class="page-actions">
-          <button class="btn" onclick="app.refreshDatabases()"><i class="fas fa-sync-alt"></i> Refresh</button>
+          <button class="btn" ${this.dc('refreshDatabases')}><i class="fas fa-sync-alt"></i> Refresh</button>
         </div>
       </div>
 
@@ -2915,7 +3069,7 @@ class ServerPanelApp {
       <div class="page-header">
         <h2><i class="fas fa-users" style="color:var(--primary);margin-right:0.5rem;font-size:0.9rem;"></i>Users</h2>
         <div class="page-actions">
-          <button class="btn btn-primary" onclick="app.createUser()"><i class="fas fa-plus"></i> Add User</button>
+          <button class="btn btn-primary" ${this.dc('createUser')}><i class="fas fa-plus"></i> Add User</button>
         </div>
       </div>
 
@@ -2945,7 +3099,7 @@ class ServerPanelApp {
       <div class="card" style="padding:0;">
         <div style="display:flex;align-items:center;justify-content:space-between;padding:0.75rem 1rem;border-bottom:1px solid var(--border);gap:0.5rem;flex-wrap:wrap;">
           <span class="section-label" style="margin:0;">All Users</span>
-          <input type="text" placeholder="Filter…" style="width:160px;" oninput="app.filterUsers(this.value)">
+          <input type="text" placeholder="Filter…" style="width:160px;" ${this.di('filterUsers', '__VALUE__')}>
         </div>
         <div style="overflow-x:auto;">
           <table class="svc-table">
@@ -2984,8 +3138,8 @@ class ServerPanelApp {
             </select>
           </div>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('add-user-modal')">Cancel</button>
-            <button class="btn btn-primary" onclick="app.submitCreateUser()"><i class="fas fa-plus"></i> Create</button>
+            <button class="btn" ${this.dc('hideModal', 'add-user-modal')}>Cancel</button>
+            <button class="btn btn-primary" ${this.dc('submitCreateUser')}><i class="fas fa-plus"></i> Create</button>
           </div>
         </div>
       </div>
@@ -3016,8 +3170,8 @@ class ServerPanelApp {
             <label style="color:var(--text-secondary);margin:0;">Active</label>
           </div>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('edit-user-modal')">Cancel</button>
-            <button class="btn btn-primary" onclick="app.submitEditUser()"><i class="fas fa-check"></i> Save</button>
+            <button class="btn" ${this.dc('hideModal', 'edit-user-modal')}>Cancel</button>
+            <button class="btn btn-primary" ${this.dc('submitEditUser')}><i class="fas fa-check"></i> Save</button>
           </div>
         </div>
       </div>
@@ -3028,7 +3182,7 @@ class ServerPanelApp {
           <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">User Profile</h3>
           <div id="view-user-content"></div>
           <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
-            <button class="btn" onclick="app.hideModal('view-user-modal')">Close</button>
+            <button class="btn" ${this.dc('hideModal', 'view-user-modal')}>Close</button>
           </div>
         </div>
       </div>
@@ -3062,10 +3216,10 @@ class ServerPanelApp {
         <div class="card" style="padding:0.5rem 0;">
           <nav>
             <ul class="nav-menu">
-              <li><a href="#" class="nav-link active" data-settings-tab="appearance" onclick="app.showSettingsSection('appearance',this)"><i class="fas fa-palette"></i><span>Appearance</span></a></li>
-              <li><a href="#" class="nav-link" data-settings-tab="general" onclick="app.showSettingsSection('general',this)"><i class="fas fa-sliders-h"></i><span>General</span></a></li>
-              <li><a href="#" class="nav-link" data-settings-tab="security" onclick="app.showSettingsSection('security',this)"><i class="fas fa-shield-alt"></i><span>Security</span></a></li>
-              <li><a href="#" class="nav-link" data-settings-tab="notifications" onclick="app.showSettingsSection('notifications',this)"><i class="fas fa-bell"></i><span>Notifications</span></a></li>
+              <li><a href="#" class="nav-link active" data-settings-tab="appearance" ${this.dc('showSettingsSection', 'appearance')}><i class="fas fa-palette"></i><span>Appearance</span></a></li>
+              <li><a href="#" class="nav-link" data-settings-tab="general" ${this.dc('showSettingsSection', 'general')}><i class="fas fa-sliders-h"></i><span>General</span></a></li>
+              <li><a href="#" class="nav-link" data-settings-tab="security" ${this.dc('showSettingsSection', 'security')}><i class="fas fa-shield-alt"></i><span>Security</span></a></li>
+              <li><a href="#" class="nav-link" data-settings-tab="notifications" ${this.dc('showSettingsSection', 'notifications')}><i class="fas fa-bell"></i><span>Notifications</span></a></li>
             </ul>
           </nav>
         </div>
@@ -3085,7 +3239,7 @@ class ServerPanelApp {
             <div class="appearance-section">
               <div class="appearance-section-label">Color Mode</div>
               <div class="mode-grid">
-                <div class="mode-card ${theme==='dark'?'active':''}" data-mode="dark" onclick="app.applyTheme('dark')">
+                <div class="mode-card ${theme==='dark'?'active':''}" data-mode="dark" ${this.dc('applyTheme', 'dark')}>
                   <div class="mode-preview dark-preview"></div>
                   <div>
                     <div class="mode-label">Dark</div>
@@ -3093,7 +3247,7 @@ class ServerPanelApp {
                   </div>
                   ${theme==='dark' ? '<i class="fas fa-check" style="margin-left:auto;color:var(--primary);font-size:0.75rem;"></i>' : ''}
                 </div>
-                <div class="mode-card ${theme==='light'?'active':''}" data-mode="light" onclick="app.applyTheme('light')">
+                <div class="mode-card ${theme==='light'?'active':''}" data-mode="light" ${this.dc('applyTheme', 'light')}>
                   <div class="mode-preview light-preview"></div>
                   <div>
                     <div class="mode-label">Light</div>
@@ -3113,7 +3267,7 @@ class ServerPanelApp {
                        data-hex="${a.hex}"
                        title="${a.label}"
                        style="background:${a.hex};"
-                       onclick="app.applyAccent('${a.hex}')">
+                       ${this.dc('applyAccent', a.hex)}>
                     ${a.hex===accent ? '<i class="fas fa-check" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:0.625rem;color:#fff;"></i>' : ''}
                   </div>
                 `).join('')}
@@ -3121,7 +3275,7 @@ class ServerPanelApp {
               <div style="margin-top:0.75rem;display:flex;align-items:center;gap:0.5rem;">
                 <label style="font-size:0.75rem;color:var(--text-secondary);margin:0;">Custom</label>
                 <input type="color" value="${accent}" style="width:32px;height:26px;padding:2px;border-radius:4px;cursor:pointer;border:1px solid var(--border);background:var(--surface-2);"
-                       oninput="app.applyAccent(this.value)">
+                       ${this.di('applyAccent', '__VALUE__')}>
                 <span style="font-size:0.75rem;color:var(--text-muted);font-family:var(--mono);" id="accent-hex-label">${accent}</span>
               </div>
             </div>
@@ -3131,7 +3285,7 @@ class ServerPanelApp {
               <div class="appearance-section-label">Interface Density</div>
               <div class="density-grid">
                 ${densities.map(d => `
-                  <div class="density-card ${d.id===density?'active':''}" data-density="${d.id}" onclick="app.applyDensity('${d.id}')">
+                  <div class="density-card ${d.id===density?'active':''}" data-density="${d.id}" ${this.dc('applyDensity', d.id)}>
                     <div class="density-preview ${d.id}">
                       <span></span><span></span><span style="width:70%"></span>
                     </div>
@@ -3144,7 +3298,7 @@ class ServerPanelApp {
 
             <!-- Reset -->
             <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border);display:flex;justify-content:flex-end;">
-              <button class="btn" onclick="app.resetAppearance()">
+              <button class="btn" ${this.dc('resetAppearance')}>
                 <i class="fas fa-undo"></i> Reset to Defaults
               </button>
             </div>
@@ -3201,7 +3355,7 @@ class ServerPanelApp {
             </div>
 
             <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:0.5rem;">
-              <button class="btn btn-primary" onclick="app.saveSettings('general')"><i class="fas fa-save"></i> Save</button>
+              <button class="btn btn-primary" ${this.dc('saveSettings', 'general')}><i class="fas fa-save"></i> Save</button>
             </div>
 
           </div><!-- /general -->
@@ -3225,7 +3379,7 @@ class ServerPanelApp {
               <input type="password" id="settings-confirm-password" placeholder="••••••••">
             </div>
             <div style="display:flex;justify-content:flex-end;margin-top:0.5rem;">
-              <button class="btn btn-primary" onclick="app.updatePassword()"><i class="fas fa-key"></i> Update Password</button>
+              <button class="btn btn-primary" ${this.dc('updatePassword')}><i class="fas fa-key"></i> Update Password</button>
             </div>
 
             <div style="margin:1.5rem 0 1rem;border-top:1px solid var(--border);padding-top:1.25rem;">
@@ -3263,7 +3417,7 @@ class ServerPanelApp {
               <input type="number" id="settings-disk-threshold" value="80" min="10" max="100" style="width:80px;">
             </div>
             <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
-              <button class="btn btn-primary" onclick="app.saveSettings('notifications')"><i class="fas fa-save"></i> Save</button>
+              <button class="btn btn-primary" ${this.dc('saveSettings', 'notifications')}><i class="fas fa-save"></i> Save</button>
             </div>
           </div><!-- /notifications -->
 
@@ -3279,8 +3433,8 @@ class ServerPanelApp {
             <input id="disable-2fa-password" type="password" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
           </div>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('disable-2fa-modal')">Cancel</button>
-            <button class="btn btn-primary" style="background:var(--danger);border-color:var(--danger);" onclick="app.submitDisableTwoFactor()"><i class="fas fa-shield-alt"></i> Disable</button>
+            <button class="btn" ${this.dc('hideModal', 'disable-2fa-modal')}>Cancel</button>
+            <button class="btn btn-primary" style="background:var(--danger);border-color:var(--danger);" ${this.dc('submitDisableTwoFactor')}><i class="fas fa-shield-alt"></i> Disable</button>
           </div>
         </div>
       </div>
@@ -3315,8 +3469,8 @@ class ServerPanelApp {
       const isFailed  = status === 'failed'  || status === 'error';
 
       const toggleBtn = isRunning
-        ? `<button class="btn btn-icon btn-sm" title="Stop"    onclick="app.stopService('${name}')"><i class="fas fa-stop"></i></button>`
-        : `<button class="btn btn-icon btn-sm" title="Start"   onclick="app.startService('${name}')"><i class="fas fa-play" style="color:var(--success)"></i></button>`;
+        ? `<button class="btn btn-icon btn-sm" title="Stop"    ${this.dc('stopService', name)}><i class="fas fa-stop"></i></button>`
+        : `<button class="btn btn-icon btn-sm" title="Start"   ${this.dc('startService', name)}><i class="fas fa-play" style="color:var(--success)"></i></button>`;
 
       return `
         <tr class="svc-row${isFailed ? ' svc-error' : ''}">
@@ -3334,8 +3488,8 @@ class ServerPanelApp {
           <td>
             <div style="display:flex;gap:0.25rem;">
               ${toggleBtn}
-              <button class="btn btn-icon btn-sm" title="Restart" onclick="app.restartService('${name}')" ${!isRunning ? 'disabled style="opacity:0.35"' : ''}><i class="fas fa-redo"></i></button>
-              <button class="btn btn-icon btn-sm" title="Logs"    onclick="app.viewServiceLogs('${name}')"><i class="fas fa-align-left"></i></button>
+              <button class="btn btn-icon btn-sm" title="Restart" ${this.dc('restartService', name)} ${!isRunning ? 'disabled style="opacity:0.35"' : ''}><i class="fas fa-redo"></i></button>
+              <button class="btn btn-icon btn-sm" title="Logs"    ${this.dc('viewServiceLogs', name)}><i class="fas fa-align-left"></i></button>
             </div>
           </td>
         </tr>`;
@@ -4012,7 +4166,7 @@ class ServerPanelApp {
     this.updateBreadcrumb(this.currentFilePath);
 
     if (results.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-muted);">No results for "${this.escapeHtml(query)}" — <a href="#" onclick="event.preventDefault(); app.loadFilesData();" style="color:var(--primary);">clear search</a></td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-muted);">No results for "${this.escapeHtml(query)}" — <a href="#" data-prevent-default ${this.dc('loadFilesData')} style="color:var(--primary);">clear search</a></td></tr>`;
       return;
     }
 
@@ -4152,10 +4306,10 @@ class ServerPanelApp {
           <td class="mono" style="font-size:0.75rem;color:var(--text-muted);">${lastLogin}</td>
           <td>
             <div style="display:flex;gap:0.25rem;">
-              <button class="btn btn-icon btn-sm" title="View" onclick="app.viewUserProfile(${u.id})"><i class="fas fa-eye"></i></button>
-              <button class="btn btn-icon btn-sm" title="Edit" onclick="app.editUser(${u.id})"><i class="fas fa-pencil-alt"></i></button>
-              <button class="btn btn-icon btn-sm" title="${u.is_active ? 'Deactivate' : 'Activate'}" ${isSelf ? 'disabled' : ''} onclick="app.toggleUserStatus(${u.id})"><i class="fas fa-${u.is_active ? 'ban' : 'check'}"></i></button>
-              <button class="btn btn-icon btn-sm" title="Delete" ${isSelf ? 'disabled' : ''} style="${isSelf ? '' : 'color:var(--danger);'}" onclick="app.deleteUser(${u.id}, '${this.escapeHtml(u.username)}')"><i class="fas fa-trash"></i></button>
+              <button class="btn btn-icon btn-sm" title="View" ${this.dc('viewUserProfile', u.id)}><i class="fas fa-eye"></i></button>
+              <button class="btn btn-icon btn-sm" title="Edit" ${this.dc('editUser', u.id)}><i class="fas fa-pencil-alt"></i></button>
+              <button class="btn btn-icon btn-sm" title="${u.is_active ? 'Deactivate' : 'Activate'}" ${isSelf ? 'disabled' : ''} ${this.dc('toggleUserStatus', u.id)}><i class="fas fa-${u.is_active ? 'ban' : 'check'}"></i></button>
+              <button class="btn btn-icon btn-sm" title="Delete" ${isSelf ? 'disabled' : ''} style="${isSelf ? '' : 'color:var(--danger);'}" ${this.dc('deleteUser', u.id, u.username)}><i class="fas fa-trash"></i></button>
             </div>
           </td>
         </tr>`;
@@ -4485,11 +4639,11 @@ class ServerPanelApp {
       container.innerHTML = `
         <div style="display:flex;align-items:center;justify-content:space-between;">
           <span class="badge badge-success"><i class="fas fa-check-circle" style="margin-right:0.3rem;"></i>Enabled</span>
-          <button class="btn btn-sm" onclick="app.showDisableTwoFactorModal()">Disable</button>
+          <button class="btn btn-sm" ${this.dc('showDisableTwoFactorModal')}>Disable</button>
         </div>`;
     } else {
       container.innerHTML = `
-        <button class="btn btn-primary" onclick="app.startTwoFactorSetup()"><i class="fas fa-qrcode"></i> Enable Two-Factor Authentication</button>
+        <button class="btn btn-primary" ${this.dc('startTwoFactorSetup')}><i class="fas fa-qrcode"></i> Enable Two-Factor Authentication</button>
         <div id="settings-2fa-setup" style="display:none;margin-top:1rem;"></div>`;
     }
   }
@@ -4511,7 +4665,7 @@ class ServerPanelApp {
             <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;font-size:0.8125rem;">Enter the 6-digit code to confirm</label>
             <div style="display:flex;gap:0.5rem;">
               <input id="settings-2fa-code" type="text" maxlength="6" inputmode="numeric" placeholder="000000" class="form-control" style="width:120px;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
-              <button class="btn btn-primary" onclick="app.confirmTwoFactorSetup()"><i class="fas fa-check"></i> Confirm</button>
+              <button class="btn btn-primary" ${this.dc('confirmTwoFactorSetup')}><i class="fas fa-check"></i> Confirm</button>
             </div>
           </div>
         </div>`;
@@ -4575,17 +4729,20 @@ class ServerPanelApp {
     }
   }
 
-  showSettingsSection(section, linkEl) {
+  // No longer takes the clicked link element as a second argument — a DOM
+  // element can't be JSON-encoded into a data-click-args attribute, so
+  // this looks its own target link up instead (every tab link already
+  // carries data-settings-tab="<section>"), which is both simpler and
+  // works regardless of what actually triggered the section change.
+  showSettingsSection(section) {
     const panels = ['appearance', 'general', 'security', 'notifications'];
     panels.forEach(id => {
       const el = document.getElementById(`settings-${id}`);
       if (el) el.style.display = id === section ? '' : 'none';
     });
-    if (linkEl) {
-      const nav = linkEl.closest('nav');
-      if (nav) nav.querySelectorAll('.nav-link').forEach(a => a.classList.remove('active'));
-      linkEl.classList.add('active');
-    }
+    document.querySelectorAll('[data-settings-tab]').forEach(a => {
+      a.classList.toggle('active', a.dataset.settingsTab === section);
+    });
   }
 
   resetAppearance() {
@@ -4607,7 +4764,7 @@ class ServerPanelApp {
             <h2 style="color:var(--text-primary);margin:0;">Domain Management</h2>
             <p style="color:var(--text-secondary);margin:0.25rem 0 0;">Manage your domains and DNS records</p>
           </div>
-          <button class="btn btn-primary" onclick="app.showAddDomainModal()">
+          <button class="btn btn-primary" ${this.dc('showAddDomainModal')}>
             <i class="fas fa-plus"></i> Add Domain
           </button>
         </div>
@@ -4622,8 +4779,8 @@ class ServerPanelApp {
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem;">
             <h3 style="color:var(--text-primary);margin:0;"><i class="fas fa-database" style="color:var(--primary);margin-right:0.5rem;"></i>DNS Records — <span id="dns-domain-name"></span></h3>
             <div style="display:flex;gap:0.75rem;">
-              <button class="btn btn-primary btn-sm" onclick="app.showAddDNSModal()"><i class="fas fa-plus"></i> Add Record</button>
-              <button class="btn btn-sm" onclick="document.getElementById('dns-editor').style.display='none'"><i class="fas fa-times"></i></button>
+              <button class="btn btn-primary btn-sm" ${this.dc('showAddDNSModal')}><i class="fas fa-plus"></i> Add Record</button>
+              <button class="btn btn-sm" ${this.dc('closeDnsEditor')}><i class="fas fa-times"></i></button>
             </div>
           </div>
           <div id="dns-records-list"></div>
@@ -4646,8 +4803,8 @@ class ServerPanelApp {
               </select>
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-              <button class="btn" onclick="app.hideModal('add-domain-modal')">Cancel</button>
-              <button class="btn btn-primary" onclick="app.addDomain()"><i class="fas fa-plus"></i> Add Domain</button>
+              <button class="btn" ${this.dc('hideModal', 'add-domain-modal')}>Cancel</button>
+              <button class="btn btn-primary" ${this.dc('addDomain')}><i class="fas fa-plus"></i> Add Domain</button>
             </div>
           </div>
         </div>
@@ -4677,8 +4834,8 @@ class ServerPanelApp {
               <input id="dns-value" type="text" placeholder="IP address, hostname, or text" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);">
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-              <button class="btn" onclick="app.hideModal('add-dns-modal')">Cancel</button>
-              <button class="btn btn-primary" onclick="app.addDNSRecord()"><i class="fas fa-plus"></i> Add Record</button>
+              <button class="btn" ${this.dc('hideModal', 'add-dns-modal')}>Cancel</button>
+              <button class="btn btn-primary" ${this.dc('addDNSRecord')}><i class="fas fa-plus"></i> Add Record</button>
             </div>
           </div>
         </div>
@@ -4696,7 +4853,7 @@ class ServerPanelApp {
       const list = document.getElementById('domains-list');
       if (!list) return;
       if (!data.success || !data.data.length) {
-        list.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-secondary);"><i class="fas fa-globe" style="font-size:3rem;opacity:0.3;margin-bottom:1rem;display:block;"></i><p>No domains added yet.</p><button class="btn btn-primary" onclick="app.showAddDomainModal()" style="margin-top:1rem;"><i class="fas fa-plus"></i> Add Your First Domain</button></div>`;
+        list.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-secondary);"><i class="fas fa-globe" style="font-size:3rem;opacity:0.3;margin-bottom:1rem;display:block;"></i><p>No domains added yet.</p><button class="btn btn-primary" ${this.dc('showAddDomainModal')} style="margin-top:1rem;"><i class="fas fa-plus"></i> Add Your First Domain</button></div>`;
         return;
       }
       list.innerHTML = `
@@ -4713,7 +4870,7 @@ class ServerPanelApp {
           </thead>
           <tbody>
             ${data.data.map(d => `
-              <tr style="border-bottom:1px solid var(--border);" onmouseenter="this.style.background='rgba(255,255,255,0.02)'" onmouseleave="this.style.background=''">
+              <tr class="hover-row" style="border-bottom:1px solid var(--border);">
                 <td style="padding:1rem 1.25rem;">
                   <div style="font-weight:600;color:var(--text-primary);">${this.escapeHtml(d.domain)}</div>
                   <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.2rem;">${this.escapeHtml(d.document_root || '')}</div>
@@ -4721,15 +4878,15 @@ class ServerPanelApp {
                 <td style="padding:1rem;"><span style="padding:0.25rem 0.6rem;background:rgba(99,102,241,0.15);color:#818cf8;border-radius:12px;font-size:0.75rem;font-weight:600;">${d.type}</span></td>
                 <td style="padding:1rem;"><span style="padding:0.25rem 0.6rem;background:${d.status==='active'?'rgba(16,185,129,0.15)':'rgba(239,68,68,0.15)'};color:${d.status==='active'?'#34d399':'#f87171'};border-radius:12px;font-size:0.75rem;font-weight:600;">${d.status}</span></td>
                 <td style="padding:1rem;">
-                  <button class="btn btn-sm" onclick="app.showPhpVersionModal(${d.id}, '${this.escapeHtml(d.domain)}', '${this.escapeHtml(d.php_version || '')}')">
+                  <button class="btn btn-sm" ${this.dc('showPhpVersionModal', d.id, d.domain, d.php_version || '')}>
                     ${d.php_version ? this.escapeHtml(d.php_version) : '<span style="color:var(--text-muted);">Not set</span>'}
                   </button>
                 </td>
                 <td style="padding:1rem;color:var(--text-secondary);">${d.dns_record_count} records</td>
                 <td style="padding:1rem;text-align:right;">
-                  <button class="btn btn-sm" onclick="app.showDNSEditor(${d.id}, '${this.escapeHtml(d.domain)}')" title="Manage DNS"><i class="fas fa-database"></i></button>
-                  <button class="btn btn-sm" onclick="app.toggleDomainStatus(${d.id}, '${d.status}')" title="${d.status==='active'?'Suspend':'Activate'}" style="margin-left:0.4rem;"><i class="fas fa-${d.status==='active'?'pause':'play'}"></i></button>
-                  <button class="btn btn-sm" onclick="app.deleteDomain(${d.id}, '${this.escapeHtml(d.domain)}')" title="Delete" style="margin-left:0.4rem;color:var(--danger);"><i class="fas fa-trash"></i></button>
+                  <button class="btn btn-sm" ${this.dc('showDNSEditor', d.id, d.domain)} title="Manage DNS"><i class="fas fa-database"></i></button>
+                  <button class="btn btn-sm" ${this.dc('toggleDomainStatus', d.id, d.status)} title="${d.status==='active'?'Suspend':'Activate'}" style="margin-left:0.4rem;"><i class="fas fa-${d.status==='active'?'pause':'play'}"></i></button>
+                  <button class="btn btn-sm" ${this.dc('deleteDomain', d.id, d.domain)} title="Delete" style="margin-left:0.4rem;color:var(--danger);"><i class="fas fa-trash"></i></button>
                 </td>
               </tr>`).join('')}
           </tbody>
@@ -4757,8 +4914,8 @@ class ServerPanelApp {
             <p style="color:var(--text-secondary);font-size:0.875rem;">No PHP versions are registered yet. An admin can register one via <code>POST /api/php/versions</code>, or trigger auto-detection on a Linux host.</p>
           `}
           <div style="display:flex;justify-content:flex-end;gap:0.75rem;">
-            <button class="btn" onclick="app.closeModal('php-version-modal')">Cancel</button>
-            ${versions.length ? `<button class="btn btn-primary" onclick="app.submitPhpVersion(${domainId})">Save</button>` : ''}
+            <button class="btn" ${this.dc('closeModal', 'php-version-modal')}>Cancel</button>
+            ${versions.length ? `<button class="btn btn-primary" ${this.dc('submitPhpVersion', domainId)}>Save</button>` : ''}
           </div>
         </div>
       </div>`;
@@ -4841,6 +4998,11 @@ class ServerPanelApp {
     await this.loadDNSRecords(domainId);
   }
 
+  closeDnsEditor() {
+    const editor = document.getElementById('dns-editor');
+    if (editor) editor.style.display = 'none';
+  }
+
   async loadDNSRecords(domainId) {
     try {
       const res = await fetch(`/api/domains/${domainId}/dns`);
@@ -4873,7 +5035,7 @@ class ServerPanelApp {
               <td style="padding:0.6rem 0.75rem;color:var(--text-primary);font-family:monospace;">${this.escapeHtml(r.name)}</td>
               <td style="padding:0.6rem 0.75rem;color:var(--text-secondary);font-family:monospace;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${this.escapeHtml(r.value)}">${this.escapeHtml(r.value)}</td>
               <td style="padding:0.6rem 0.75rem;color:var(--text-secondary);">${r.ttl}s</td>
-              <td style="padding:0.6rem 0.75rem;text-align:right;"><button class="btn btn-sm" onclick="app.deleteDNSRecord(${domainId},${r.id})" style="color:var(--danger);padding:0.2rem 0.5rem;"><i class="fas fa-times"></i></button></td>
+              <td style="padding:0.6rem 0.75rem;text-align:right;"><button class="btn btn-sm" ${this.dc('deleteDNSRecord', domainId, r.id)} style="color:var(--danger);padding:0.2rem 0.5rem;"><i class="fas fa-times"></i></button></td>
             </tr>`).join('')}
           </tbody>
         </table>`;
@@ -4924,8 +5086,8 @@ class ServerPanelApp {
             <p style="color:var(--text-secondary);margin:0.25rem 0 0;">Manage HTTPS certificates for your domains</p>
           </div>
           <div style="display:flex;gap:0.75rem;">
-            <button class="btn btn-primary" onclick="app.showIssueSSLModal()"><i class="fas fa-magic"></i> Issue Free SSL</button>
-            <button class="btn" onclick="app.showUploadSSLModal()"><i class="fas fa-upload"></i> Upload Cert</button>
+            <button class="btn btn-primary" ${this.dc('showIssueSSLModal')}><i class="fas fa-magic"></i> Issue Free SSL</button>
+            <button class="btn" ${this.dc('showUploadSSLModal')}><i class="fas fa-upload"></i> Upload Cert</button>
           </div>
         </div>
         <div id="ssl-list" class="card" style="padding:0;overflow:hidden;">
@@ -4945,8 +5107,8 @@ class ServerPanelApp {
               <label for="ssl-auto-renew" style="color:var(--text-secondary);font-size:0.875rem;">Auto-renew before expiry</label>
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-              <button class="btn" onclick="app.hideModal('issue-ssl-modal')">Cancel</button>
-              <button class="btn btn-primary" onclick="app.issueSSL()"><i class="fas fa-magic"></i> Issue Certificate</button>
+              <button class="btn" ${this.dc('hideModal', 'issue-ssl-modal')}>Cancel</button>
+              <button class="btn btn-primary" ${this.dc('issueSSL')}><i class="fas fa-magic"></i> Issue Certificate</button>
             </div>
           </div>
         </div>
@@ -4967,8 +5129,8 @@ class ServerPanelApp {
               <textarea id="upload-ssl-key" rows="4" placeholder="-----BEGIN PRIVATE KEY-----" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);font-family:monospace;font-size:0.8rem;resize:vertical;box-sizing:border-box;"></textarea>
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-              <button class="btn" onclick="app.hideModal('upload-ssl-modal')">Cancel</button>
-              <button class="btn btn-primary" onclick="app.uploadSSL()"><i class="fas fa-upload"></i> Upload</button>
+              <button class="btn" ${this.dc('hideModal', 'upload-ssl-modal')}>Cancel</button>
+              <button class="btn btn-primary" ${this.dc('uploadSSL')}><i class="fas fa-upload"></i> Upload</button>
             </div>
           </div>
         </div>
@@ -4983,7 +5145,7 @@ class ServerPanelApp {
       const list = document.getElementById('ssl-list');
       if (!list) return;
       if (!data.success || !data.data.length) {
-        list.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-secondary);"><i class="fas fa-lock-open" style="font-size:3rem;opacity:0.3;margin-bottom:1rem;display:block;"></i><p>No certificates yet.</p><button class="btn btn-primary" onclick="app.showIssueSSLModal()" style="margin-top:1rem;"><i class="fas fa-magic"></i> Issue Free SSL</button></div>`;
+        list.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-secondary);"><i class="fas fa-lock-open" style="font-size:3rem;opacity:0.3;margin-bottom:1rem;display:block;"></i><p>No certificates yet.</p><button class="btn btn-primary" ${this.dc('showIssueSSLModal')} style="margin-top:1rem;"><i class="fas fa-magic"></i> Issue Free SSL</button></div>`;
         return;
       }
       list.innerHTML = `
@@ -4999,7 +5161,7 @@ class ServerPanelApp {
             const expireColor = c.is_expired ? 'var(--danger)' : c.days_until_expiry < 30 ? 'var(--warning)' : 'var(--success)';
             const statusColor = { active:'rgba(16,185,129,0.15)', expired:'rgba(239,68,68,0.15)', pending:'rgba(251,191,36,0.15)', failed:'rgba(239,68,68,0.15)' }[c.status] || 'rgba(100,116,139,0.2)';
             const statusText = { active:'#34d399', expired:'#f87171', pending:'#fbbf24', failed:'#f87171' }[c.status] || '#94a3b8';
-            return `<tr style="border-bottom:1px solid var(--border);" onmouseenter="this.style.background='rgba(255,255,255,0.02)'" onmouseleave="this.style.background=''">
+            return `<tr class="hover-row" style="border-bottom:1px solid var(--border);">
               <td style="padding:1rem 1.25rem;font-weight:600;color:var(--text-primary);">${this.escapeHtml(c.domain)}</td>
               <td style="padding:1rem;color:var(--text-secondary);">${this.escapeHtml(c.issuer)}</td>
               <td style="padding:1rem;"><span style="padding:0.25rem 0.6rem;background:${statusColor};color:${statusText};border-radius:12px;font-size:0.75rem;font-weight:600;">${c.status}</span></td>
@@ -5007,8 +5169,8 @@ class ServerPanelApp {
                 ${c.expires_at ? `${new Date(c.expires_at).toLocaleDateString()} (${c.is_expired?'expired':`${c.days_until_expiry}d left`})` : '—'}
               </td>
               <td style="padding:1rem;text-align:right;">
-                ${c.source==='letsencrypt'?`<button class="btn btn-sm" onclick="app.renewSSL(${c.id})" title="Renew"><i class="fas fa-sync"></i></button>`:''}
-                <button class="btn btn-sm" onclick="app.deleteSSL(${c.id},'${this.escapeHtml(c.domain)}')" title="Delete" style="margin-left:0.4rem;color:var(--danger);"><i class="fas fa-trash"></i></button>
+                ${c.source==='letsencrypt'?`<button class="btn btn-sm" ${this.dc('renewSSL', c.id)} title="Renew"><i class="fas fa-sync"></i></button>`:''}
+                <button class="btn btn-sm" ${this.dc('deleteSSL', c.id, c.domain)} title="Delete" style="margin-left:0.4rem;color:var(--danger);"><i class="fas fa-trash"></i></button>
               </td>
             </tr>`;}).join('')}
           </tbody>
@@ -5076,10 +5238,10 @@ class ServerPanelApp {
     return `
       <div style="margin-top:2rem;">
         <div style="display:flex;gap:1rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border);padding-bottom:0;">
-          <button id="email-tab-accounts" class="email-tab active-tab" onclick="app.switchEmailTab('accounts')" style="padding:0.75rem 1.25rem;background:none;border:none;border-bottom:2px solid var(--primary);color:var(--primary);font-weight:600;cursor:pointer;">
+          <button id="email-tab-accounts" class="email-tab active-tab" ${this.dc('switchEmailTab', 'accounts')} style="padding:0.75rem 1.25rem;background:none;border:none;border-bottom:2px solid var(--primary);color:var(--primary);font-weight:600;cursor:pointer;">
             <i class="fas fa-user"></i> Accounts
           </button>
-          <button id="email-tab-forwarders" class="email-tab" onclick="app.switchEmailTab('forwarders')" style="padding:0.75rem 1.25rem;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-secondary);font-weight:600;cursor:pointer;">
+          <button id="email-tab-forwarders" class="email-tab" ${this.dc('switchEmailTab', 'forwarders')} style="padding:0.75rem 1.25rem;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-secondary);font-weight:600;cursor:pointer;">
             <i class="fas fa-forward"></i> Forwarders
           </button>
         </div>
@@ -5087,7 +5249,7 @@ class ServerPanelApp {
         <div id="email-accounts-tab">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem;">
             <h3 style="color:var(--text-primary);margin:0;">Email Accounts</h3>
-            <button class="btn btn-primary" onclick="app.showCreateEmailModal()"><i class="fas fa-plus"></i> Create Account</button>
+            <button class="btn btn-primary" ${this.dc('showCreateEmailModal')}><i class="fas fa-plus"></i> Create Account</button>
           </div>
           <div id="email-accounts-list" class="card" style="padding:0;overflow:hidden;">
             <div style="text-align:center;padding:3rem;color:var(--text-secondary);"><div class="loading" style="margin:0 auto 1rem;"></div><p>Loading...</p></div>
@@ -5097,7 +5259,7 @@ class ServerPanelApp {
         <div id="email-forwarders-tab" style="display:none;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem;">
             <h3 style="color:var(--text-primary);margin:0;">Email Forwarders</h3>
-            <button class="btn btn-primary" onclick="app.showAddForwarderModal()"><i class="fas fa-plus"></i> Add Forwarder</button>
+            <button class="btn btn-primary" ${this.dc('showAddForwarderModal')}><i class="fas fa-plus"></i> Add Forwarder</button>
           </div>
           <div id="email-forwarders-list" class="card" style="padding:0;overflow:hidden;">
             <div style="text-align:center;padding:3rem;color:var(--text-secondary);"><div class="loading" style="margin:0 auto 1rem;"></div><p>Loading...</p></div>
@@ -5126,8 +5288,8 @@ class ServerPanelApp {
               <input id="email-quota" type="number" value="1024" min="0" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-              <button class="btn" onclick="app.hideModal('create-email-modal')">Cancel</button>
-              <button class="btn btn-primary" onclick="app.createEmailAccount()"><i class="fas fa-plus"></i> Create</button>
+              <button class="btn" ${this.dc('hideModal', 'create-email-modal')}>Cancel</button>
+              <button class="btn btn-primary" ${this.dc('createEmailAccount')}><i class="fas fa-plus"></i> Create</button>
             </div>
           </div>
         </div>
@@ -5150,8 +5312,8 @@ class ServerPanelApp {
               <input id="fwd-dest" type="email" placeholder="you@gmail.com" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-              <button class="btn" onclick="app.hideModal('add-forwarder-modal')">Cancel</button>
-              <button class="btn btn-primary" onclick="app.addForwarder()"><i class="fas fa-plus"></i> Add</button>
+              <button class="btn" ${this.dc('hideModal', 'add-forwarder-modal')}>Cancel</button>
+              <button class="btn btn-primary" ${this.dc('addForwarder')}><i class="fas fa-plus"></i> Add</button>
             </div>
           </div>
         </div>
@@ -5194,7 +5356,7 @@ class ServerPanelApp {
           <tbody>${data.data.map(a => {
             const pct = a.quota_mb > 0 ? Math.round((a.used_mb / a.quota_mb) * 100) : 0;
             const barColor = pct > 85 ? 'var(--danger)' : pct > 60 ? 'var(--warning)' : 'var(--success)';
-            return `<tr style="border-bottom:1px solid var(--border);" onmouseenter="this.style.background='rgba(255,255,255,0.02)'" onmouseleave="this.style.background=''">
+            return `<tr class="hover-row" style="border-bottom:1px solid var(--border);">
               <td style="padding:1rem 1.25rem;">
                 <div style="font-weight:600;color:var(--text-primary);">${this.escapeHtml(a.local_part)}@${this.escapeHtml(a.domain)}</div>
               </td>
@@ -5204,7 +5366,7 @@ class ServerPanelApp {
               </td>
               <td style="padding:1rem;"><span style="padding:0.25rem 0.6rem;background:${a.is_active?'rgba(16,185,129,0.15)':'rgba(239,68,68,0.15)'};color:${a.is_active?'#34d399':'#f87171'};border-radius:12px;font-size:0.75rem;font-weight:600;">${a.is_active?'Active':'Suspended'}</span></td>
               <td style="padding:1rem;text-align:right;">
-                <button class="btn btn-sm" onclick="app.deleteEmailAccount(${a.id},'${this.escapeHtml(a.local_part)}@${this.escapeHtml(a.domain)}')" style="color:var(--danger);"><i class="fas fa-trash"></i></button>
+                <button class="btn btn-sm" ${this.dc('deleteEmailAccount', a.id, `${a.local_part}@${a.domain}`)} style="color:var(--danger);"><i class="fas fa-trash"></i></button>
               </td>
             </tr>`;}).join('')}
           </tbody>
@@ -5231,12 +5393,12 @@ class ServerPanelApp {
             <th style="padding:1rem;text-align:right;color:var(--text-secondary);font-size:0.8125rem;text-transform:uppercase;">Actions</th>
           </tr></thead>
           <tbody>${data.data.map(f => `
-            <tr style="border-bottom:1px solid var(--border);" onmouseenter="this.style.background='rgba(255,255,255,0.02)'" onmouseleave="this.style.background=''">
+            <tr class="hover-row" style="border-bottom:1px solid var(--border);">
               <td style="padding:1rem 1.25rem;font-family:monospace;color:var(--text-primary);">${this.escapeHtml(f.source)}</td>
               <td style="padding:1rem;color:var(--text-secondary);"><i class="fas fa-arrow-right"></i></td>
               <td style="padding:1rem;font-family:monospace;color:var(--primary);">${this.escapeHtml(f.destination)}</td>
               <td style="padding:1rem;text-align:right;">
-                <button class="btn btn-sm" onclick="app.deleteForwarder(${f.id})" style="color:var(--danger);"><i class="fas fa-trash"></i></button>
+                <button class="btn btn-sm" ${this.dc('deleteForwarder', f.id)} style="color:var(--danger);"><i class="fas fa-trash"></i></button>
               </td>
             </tr>`).join('')}
           </tbody>
@@ -5324,7 +5486,7 @@ class ServerPanelApp {
       <div style="margin-top:2rem;">
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem;">
           ${[['full','Full Backup','fas fa-hdd','var(--primary)'],['files','Files Only','fas fa-folder','var(--warning)'],['database','Databases','fas fa-database','var(--info)'],['emails','Emails','fas fa-envelope','var(--success)']].map(([type,label,icon,color]) => `
-            <div class="card" style="text-align:center;padding:1.5rem;cursor:pointer;transition:border-color 0.2s;" onmouseenter="this.style.borderColor='${color}'" onmouseleave="this.style.borderColor=''" onclick="app.createBackup('${type}')">
+            <div class="card hover-border-card" style="text-align:center;padding:1.5rem;cursor:pointer;transition:border-color 0.2s;--hover-border:${color};" ${this.dc('createBackup', type)}>
               <i class="${icon}" style="font-size:2rem;color:${color};margin-bottom:0.75rem;display:block;"></i>
               <div style="font-weight:600;color:var(--text-primary);margin-bottom:0.25rem;">${label}</div>
               <div style="font-size:0.75rem;color:var(--text-secondary);">Click to back up</div>
@@ -5335,7 +5497,7 @@ class ServerPanelApp {
           <div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
               <h3 style="color:var(--text-primary);margin:0;">Backup History</h3>
-              <button class="btn btn-sm" onclick="app.loadBackupsData()"><i class="fas fa-sync"></i> Refresh</button>
+              <button class="btn btn-sm" ${this.dc('loadBackupsData')}><i class="fas fa-sync"></i> Refresh</button>
             </div>
             <div id="backup-history" class="card" style="padding:0;overflow:hidden;max-height:480px;overflow-y:auto;">
               <div style="text-align:center;padding:2rem;color:var(--text-secondary);"><div class="loading" style="margin:0 auto 0.75rem;"></div><p>Loading...</p></div>
@@ -5345,7 +5507,7 @@ class ServerPanelApp {
           <div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
               <h3 style="color:var(--text-primary);margin:0;">Schedules</h3>
-              <button class="btn btn-primary btn-sm" onclick="app.showAddScheduleModal()"><i class="fas fa-plus"></i> Add Schedule</button>
+              <button class="btn btn-primary btn-sm" ${this.dc('showAddScheduleModal')}><i class="fas fa-plus"></i> Add Schedule</button>
             </div>
             <div id="backup-schedules" class="card" style="padding:0;overflow:hidden;">
               <div style="text-align:center;padding:2rem;color:var(--text-secondary);"><div class="loading" style="margin:0 auto 0.75rem;"></div><p>Loading...</p></div>
@@ -5376,8 +5538,8 @@ class ServerPanelApp {
               <input id="sched-retention" type="number" value="7" min="1" max="365" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
             </div>
             <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-              <button class="btn" onclick="app.hideModal('add-schedule-modal')">Cancel</button>
-              <button class="btn btn-primary" onclick="app.addBackupSchedule()"><i class="fas fa-plus"></i> Create Schedule</button>
+              <button class="btn" ${this.dc('hideModal', 'add-schedule-modal')}>Cancel</button>
+              <button class="btn btn-primary" ${this.dc('addBackupSchedule')}><i class="fas fa-plus"></i> Create Schedule</button>
             </div>
           </div>
         </div>
@@ -5411,8 +5573,8 @@ class ServerPanelApp {
           </div>
           <span style="flex-shrink:0;font-size:0.75rem;font-weight:600;color:${statusColor};">${b.status}</span>
           <div style="display:flex;gap:0.35rem;flex-shrink:0;">
-            ${b.status==='completed'?`<button class="btn btn-sm" onclick="app.restoreBackup(${b.id})" title="Restore"><i class="fas fa-undo"></i></button>`:''}
-            <button class="btn btn-sm" onclick="app.deleteBackup(${b.id})" title="Delete" style="color:var(--danger);"><i class="fas fa-trash"></i></button>
+            ${b.status==='completed'?`<button class="btn btn-sm" ${this.dc('restoreBackup', b.id)} title="Restore"><i class="fas fa-undo"></i></button>`:''}
+            <button class="btn btn-sm" ${this.dc('deleteBackup', b.id)} title="Delete" style="color:var(--danger);"><i class="fas fa-trash"></i></button>
           </div>
         </div>`;
       }).join('');
@@ -5437,8 +5599,8 @@ class ServerPanelApp {
           </div>
           <span style="font-size:0.75rem;font-weight:600;color:${s.is_active?'var(--success)':'var(--text-secondary)'};">${s.is_active?'Active':'Paused'}</span>
           <div style="display:flex;gap:0.35rem;">
-            <button class="btn btn-sm" onclick="app.toggleSchedule(${s.id},${s.is_active})" title="${s.is_active?'Pause':'Resume'}"><i class="fas fa-${s.is_active?'pause':'play'}"></i></button>
-            <button class="btn btn-sm" onclick="app.deleteBackupSchedule(${s.id})" title="Delete" style="color:var(--danger);"><i class="fas fa-trash"></i></button>
+            <button class="btn btn-sm" ${this.dc('toggleSchedule', s.id, s.is_active)} title="${s.is_active?'Pause':'Resume'}"><i class="fas fa-${s.is_active?'pause':'play'}"></i></button>
+            <button class="btn btn-sm" ${this.dc('deleteBackupSchedule', s.id)} title="Delete" style="color:var(--danger);"><i class="fas fa-trash"></i></button>
           </div>
         </div>`).join('');
     } catch (err) { this.showToast('Failed to load schedules', 'error'); }
@@ -5524,7 +5686,7 @@ class ServerPanelApp {
             <h2 style="color:var(--text-primary);margin:0;">Application Catalog</h2>
             <p style="color:var(--text-secondary);margin:0.25rem 0 0;">One-click install popular server applications</p>
           </div>
-          <input type="text" placeholder="Search…" style="width:200px;" oninput="app.filterAppCatalog(this.value)">
+          <input type="text" placeholder="Search…" style="width:200px;" ${this.di('filterAppCatalog', '__VALUE__')}>
         </div>
         <div id="app-catalog-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:1rem;margin-bottom:2rem;">
           <div style="grid-column:1/-1;text-align:center;padding:2rem;color:var(--text-secondary);"><div class="loading" style="margin:0 auto 0.75rem;"></div><p>Loading catalog...</p></div>
@@ -5532,7 +5694,7 @@ class ServerPanelApp {
 
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
           <h3 style="color:var(--text-primary);margin:0;">Installed Applications</h3>
-          <button class="btn btn-sm" onclick="app.loadApplicationsData()"><i class="fas fa-sync"></i> Refresh</button>
+          <button class="btn btn-sm" ${this.dc('loadApplicationsData')}><i class="fas fa-sync"></i> Refresh</button>
         </div>
         <div id="app-installed-list" class="card" style="padding:0;overflow:hidden;">
           <div style="text-align:center;padding:2rem;color:var(--text-secondary);"><div class="loading" style="margin:0 auto 0.75rem;"></div><p>Loading...</p></div>
@@ -5553,8 +5715,8 @@ class ServerPanelApp {
             <input id="install-app-path" type="text" placeholder="Defaults to the web root" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
           </div>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('install-app-modal')">Cancel</button>
-            <button class="btn btn-primary" onclick="app.submitInstallApp()"><i class="fas fa-download"></i> Install</button>
+            <button class="btn" ${this.dc('hideModal', 'install-app-modal')}>Cancel</button>
+            <button class="btn btn-primary" ${this.dc('submitInstallApp')}><i class="fas fa-download"></i> Install</button>
           </div>
         </div>
       </div>
@@ -5594,11 +5756,11 @@ class ServerPanelApp {
       const busy = app.installationStatus === 'installing' || app.installationStatus === 'uninstalling';
       let actionBtn;
       if (app.isInstalled) {
-        actionBtn = `<button class="btn btn-sm" style="width:100%;color:var(--danger);" onclick="app.uninstallApp(${app.installationId}, '${this.escapeHtml(app.name)}')"><i class="fas fa-trash"></i> Uninstall</button>`;
+        actionBtn = `<button class="btn btn-sm" style="width:100%;color:var(--danger);" ${this.dc('uninstallApp', app.installationId, app.name)}><i class="fas fa-trash"></i> Uninstall</button>`;
       } else if (busy) {
         actionBtn = `<button class="btn btn-sm" style="width:100%;" disabled><i class="fas fa-spinner fa-spin"></i> ${app.installationStatus}...</button>`;
       } else {
-        actionBtn = `<button class="btn btn-primary btn-sm" style="width:100%;" onclick="app.showInstallAppModal('${app.id}', '${this.escapeHtml(app.name)}')"><i class="fas fa-download"></i> Install</button>`;
+        actionBtn = `<button class="btn btn-primary btn-sm" style="width:100%;" ${this.dc('showInstallAppModal', app.id, app.name)}><i class="fas fa-download"></i> Install</button>`;
       }
       return `
         <div class="card" style="text-align:center;padding:1.25rem;">
@@ -5640,7 +5802,7 @@ class ServerPanelApp {
           </div>
           <span style="flex-shrink:0;font-size:0.75rem;font-weight:600;color:${statusColor[a.status]||'var(--text-secondary)'};">${a.status}${a.progress != null && a.status !== 'installed' ? ` ${a.progress}%` : ''}</span>
           <div style="display:flex;gap:0.35rem;flex-shrink:0;">
-            ${a.status === 'installed' ? `<button class="btn btn-sm" onclick="app.uninstallApp(${a.installationId}, '${this.escapeHtml(a.name)}')" title="Uninstall" style="color:var(--danger);"><i class="fas fa-trash"></i></button>` : ''}
+            ${a.status === 'installed' ? `<button class="btn btn-sm" ${this.dc('uninstallApp', a.installationId, a.name)} title="Uninstall" style="color:var(--danger);"><i class="fas fa-trash"></i></button>` : ''}
           </div>
         </div>`).join('');
     } catch (err) {
@@ -5714,7 +5876,7 @@ class ServerPanelApp {
             <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-terminal" style="color:var(--primary);margin-right:0.5rem;"></i>Terminal</h2>
             <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Admin-only. Every command is logged.</p>
           </div>
-          <button class="btn btn-sm" onclick="app.loadTerminalHistory()"><i class="fas fa-history"></i> History</button>
+          <button class="btn btn-sm" ${this.dc('loadTerminalHistory')}><i class="fas fa-history"></i> History</button>
         </div>
         <div class="card" style="padding:0;overflow:hidden;">
           <div id="terminal-output" style="background:#0d1117;color:#c9d1d9;font-family:'Consolas','Courier New',monospace;font-size:0.8125rem;padding:1rem;height:420px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;">Connected. Type a command below and press Enter.
@@ -5734,7 +5896,7 @@ class ServerPanelApp {
           <h3 style="color:var(--text-primary);margin-bottom:1rem;">Recent Commands</h3>
           <div id="terminal-history-list"></div>
           <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
-            <button class="btn" onclick="app.hideModal('terminal-history-modal')">Close</button>
+            <button class="btn" ${this.dc('hideModal', 'terminal-history-modal')}>Close</button>
           </div>
         </div>
       </div>
@@ -5759,7 +5921,7 @@ class ServerPanelApp {
           <div style="display:flex;gap:0.75rem;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="flex:1;min-width:220px;">
               <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Action</label>
-              <select id="safe-terminal-action" class="form-control" style="width:100%;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" onchange="app._onSafeActionChange('safe-terminal-action', 'safe-terminal-domain-group')">
+              <select id="safe-terminal-action" class="form-control" style="width:100%;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" ${this.dchg('_onSafeActionChange', 'safe-terminal-action', 'safe-terminal-domain-group')}>
                 <option value="">Loading…</option>
               </select>
             </div>
@@ -5767,7 +5929,7 @@ class ServerPanelApp {
               <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Domain</label>
               <select id="safe-terminal-domain" class="form-control" style="width:100%;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);"></select>
             </div>
-            <button class="btn btn-primary" onclick="app.runSafeTerminalAction()"><i class="fas fa-play"></i> Run</button>
+            <button class="btn btn-primary" ${this.dc('runSafeTerminalAction')}><i class="fas fa-play"></i> Run</button>
           </div>
         </div>
         <div class="card" style="padding:0;overflow:hidden;margin-top:0.75rem;">
@@ -5971,7 +6133,7 @@ class ServerPanelApp {
             <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-clock" style="color:var(--primary);margin-right:0.5rem;"></i>Cron Jobs</h2>
             <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Admin-only scheduled commands.</p>
           </div>
-          <button class="btn btn-primary" onclick="app.showCreateCronModal()"><i class="fas fa-plus"></i> New Job</button>
+          <button class="btn btn-primary" ${this.dc('showCreateCronModal')}><i class="fas fa-plus"></i> New Job</button>
         </div>
         <div class="card" style="padding:0;overflow:hidden;">
           <div style="overflow-x:auto;">
@@ -6010,8 +6172,8 @@ class ServerPanelApp {
             <label style="color:var(--text-secondary);margin:0;">Active</label>
           </div>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('cron-modal')">Cancel</button>
-            <button class="btn btn-primary" onclick="app.submitCronJob()"><i class="fas fa-check"></i> Save</button>
+            <button class="btn" ${this.dc('hideModal', 'cron-modal')}>Cancel</button>
+            <button class="btn btn-primary" ${this.dc('submitCronJob')}><i class="fas fa-check"></i> Save</button>
           </div>
         </div>
       </div>
@@ -6022,7 +6184,7 @@ class ServerPanelApp {
           <h3 style="color:var(--text-primary);margin-bottom:1rem;">Last Run Output</h3>
           <pre id="cron-output-content" style="background:#0d1117;color:#c9d1d9;padding:1rem;border-radius:var(--border-radius-sm);max-height:400px;overflow:auto;font-size:0.78rem;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
-            <button class="btn" onclick="app.hideModal('cron-output-modal')">Close</button>
+            <button class="btn" ${this.dc('hideModal', 'cron-output-modal')}>Close</button>
           </div>
         </div>
       </div>
@@ -6042,7 +6204,7 @@ class ServerPanelApp {
             <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-clock" style="color:var(--primary);margin-right:0.5rem;"></i>Cron Jobs</h2>
             <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Schedule one of a fixed set of read-only actions. Free-text commands are admin-only.</p>
           </div>
-          <button class="btn btn-primary" onclick="app.showCreateSafeCronModal()"><i class="fas fa-plus"></i> New Job</button>
+          <button class="btn btn-primary" ${this.dc('showCreateSafeCronModal')}><i class="fas fa-plus"></i> New Job</button>
         </div>
         <div class="card" style="padding:0;overflow:hidden;">
           <div style="overflow-x:auto;">
@@ -6073,7 +6235,7 @@ class ServerPanelApp {
           </div>
           <div class="form-group" style="margin-bottom:1rem;">
             <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Action</label>
-            <select id="safe-cron-action" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" onchange="app._onSafeActionChange('safe-cron-action', 'safe-cron-domain-group')">
+            <select id="safe-cron-action" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" ${this.dchg('_onSafeActionChange', 'safe-cron-action', 'safe-cron-domain-group')}>
               <option value="">Loading…</option>
             </select>
           </div>
@@ -6086,8 +6248,8 @@ class ServerPanelApp {
             <label style="color:var(--text-secondary);margin:0;">Active</label>
           </div>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('safe-cron-modal')">Cancel</button>
-            <button class="btn btn-primary" onclick="app.submitSafeCronJob()"><i class="fas fa-check"></i> Save</button>
+            <button class="btn" ${this.dc('hideModal', 'safe-cron-modal')}>Cancel</button>
+            <button class="btn btn-primary" ${this.dc('submitSafeCronJob')}><i class="fas fa-check"></i> Save</button>
           </div>
         </div>
       </div>
@@ -6098,7 +6260,7 @@ class ServerPanelApp {
           <h3 style="color:var(--text-primary);margin-bottom:1rem;">Last Run Output</h3>
           <pre id="cron-output-content" style="background:#0d1117;color:#c9d1d9;padding:1rem;border-radius:var(--border-radius-sm);max-height:400px;overflow:auto;font-size:0.78rem;white-space:pre-wrap;word-break:break-word;"></pre>
           <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
-            <button class="btn" onclick="app.hideModal('cron-output-modal')">Close</button>
+            <button class="btn" ${this.dc('hideModal', 'cron-output-modal')}>Close</button>
           </div>
         </div>
       </div>
@@ -6129,9 +6291,9 @@ class ServerPanelApp {
             <td style="font-size:0.75rem;">${lastRun}</td>
             <td>
               <div style="display:flex;gap:0.25rem;">
-                <button class="btn btn-icon btn-sm" title="Run Now" onclick="app.runSafeCronJobNow(${job.id})"><i class="fas fa-play"></i></button>
-                <button class="btn btn-icon btn-sm" title="View Output" onclick="app.showSafeCronOutput(${job.id})"><i class="fas fa-align-left"></i></button>
-                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteSafeCronJob(${job.id})"><i class="fas fa-trash"></i></button>
+                <button class="btn btn-icon btn-sm" title="Run Now" ${this.dc('runSafeCronJobNow', job.id)}><i class="fas fa-play"></i></button>
+                <button class="btn btn-icon btn-sm" title="View Output" ${this.dc('showSafeCronOutput', job.id)}><i class="fas fa-align-left"></i></button>
+                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" ${this.dc('deleteSafeCronJob', job.id)}><i class="fas fa-trash"></i></button>
               </div>
             </td>
           </tr>`;
@@ -6261,10 +6423,10 @@ class ServerPanelApp {
             <td style="font-size:0.75rem;">${lastRun}</td>
             <td>
               <div style="display:flex;gap:0.25rem;">
-                <button class="btn btn-icon btn-sm" title="Run Now" onclick="app.runCronJobNow(${job.id})"><i class="fas fa-play"></i></button>
-                <button class="btn btn-icon btn-sm" title="View Output" onclick="app.showCronOutput(${job.id})"><i class="fas fa-align-left"></i></button>
-                <button class="btn btn-icon btn-sm" title="Edit" onclick="app.showEditCronModal(${job.id})"><i class="fas fa-pencil-alt"></i></button>
-                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteCronJob(${job.id})"><i class="fas fa-trash"></i></button>
+                <button class="btn btn-icon btn-sm" title="Run Now" ${this.dc('runCronJobNow', job.id)}><i class="fas fa-play"></i></button>
+                <button class="btn btn-icon btn-sm" title="View Output" ${this.dc('showCronOutput', job.id)}><i class="fas fa-align-left"></i></button>
+                <button class="btn btn-icon btn-sm" title="Edit" ${this.dc('showEditCronModal', job.id)}><i class="fas fa-pencil-alt"></i></button>
+                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" ${this.dc('deleteCronJob', job.id)}><i class="fas fa-trash"></i></button>
               </div>
             </td>
           </tr>`;
@@ -6392,7 +6554,7 @@ class ServerPanelApp {
             <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-exchange-alt" style="color:var(--primary);margin-right:0.5rem;"></i>FTP Accounts</h2>
             <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Manage FTP accounts and their home directories.</p>
           </div>
-          <button class="btn btn-primary" onclick="app.showCreateFtpModal()"><i class="fas fa-plus"></i> Add Account</button>
+          <button class="btn btn-primary" ${this.dc('showCreateFtpModal')}><i class="fas fa-plus"></i> Add Account</button>
         </div>
         <div id="ftp-activation-banner"></div>
         <div class="card" style="padding:0;overflow:hidden;">
@@ -6436,8 +6598,8 @@ class ServerPanelApp {
             <input id="ftp-quota" type="number" value="1024" min="0" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
           </div>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('ftp-modal')">Cancel</button>
-            <button class="btn btn-primary" onclick="app.submitCreateFtp()"><i class="fas fa-plus"></i> Create</button>
+            <button class="btn" ${this.dc('hideModal', 'ftp-modal')}>Cancel</button>
+            <button class="btn btn-primary" ${this.dc('submitCreateFtp')}><i class="fas fa-plus"></i> Create</button>
           </div>
         </div>
       </div>
@@ -6488,7 +6650,7 @@ class ServerPanelApp {
             ${acc.activated ? '<span class="badge badge-info" title="Live on the FTP server">Live</span>' : '<span class="badge badge-muted" title="Not yet activated on the FTP server">Not live</span>'}
           </td>
           <td>
-            <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteFtpAccount(${acc.id}, '${this.escapeHtml(acc.username)}')"><i class="fas fa-trash"></i></button>
+            <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" ${this.dc('deleteFtpAccount', acc.id, acc.username)}><i class="fas fa-trash"></i></button>
           </td>
         </tr>`).join('');
     } catch (error) {
@@ -6567,7 +6729,7 @@ class ServerPanelApp {
         <div class="card" style="margin-top:0.75rem;">
           <div class="form-group" style="margin-bottom:1rem;">
             <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Domain</label>
-            <select id="sp-domain" class="form-control" style="width:100%;max-width:360px;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" onchange="app.onSitePublisherDomainChange()">
+            <select id="sp-domain" class="form-control" style="width:100%;max-width:360px;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" ${this.dchg('onSitePublisherDomainChange')}>
               <option value="">Loading…</option>
             </select>
           </div>
@@ -6585,8 +6747,8 @@ class ServerPanelApp {
           <label style="color:var(--text-secondary);display:block;margin-bottom:0.6rem;">Content</label>
           <div id="sp-fields"></div>
           <div style="display:flex;gap:0.75rem;margin-top:1rem;">
-            <button class="btn" onclick="app.previewSitePublisher()"><i class="fas fa-eye"></i> Preview</button>
-            ${canPublish ? `<button class="btn btn-primary" onclick="app.publishSitePublisher()"><i class="fas fa-upload"></i> Publish</button>` : ''}
+            <button class="btn" ${this.dc('previewSitePublisher')}><i class="fas fa-eye"></i> Preview</button>
+            ${canPublish ? `<button class="btn btn-primary" ${this.dc('publishSitePublisher')}><i class="fas fa-upload"></i> Publish</button>` : ''}
           </div>
         </div>
       </div>
@@ -6596,7 +6758,7 @@ class ServerPanelApp {
         <div class="card" style="width:900px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
             <h3 style="color:var(--text-primary);margin:0;">Preview</h3>
-            <button class="btn" onclick="app.hideModal('sp-preview-modal')">Close</button>
+            <button class="btn" ${this.dc('hideModal', 'sp-preview-modal')}>Close</button>
           </div>
           <iframe id="sp-preview-frame" style="flex:1;min-height:60vh;width:100%;border:1px solid var(--border);border-radius:var(--border-radius-sm);background:#fff;" sandbox=""></iframe>
         </div>
@@ -6642,7 +6804,7 @@ class ServerPanelApp {
     const container = document.getElementById('sp-templates');
     if (!container) return;
     container.innerHTML = this._spTemplates.map(t => `
-      <div class="sp-template-card" data-key="${t.key}" onclick="app.selectSitePublisherTemplate('${t.key}')"
+      <div class="sp-template-card" data-key="${t.key}" ${this.dc('selectSitePublisherTemplate', t.key)}
         style="border:2px solid var(--border);border-radius:var(--border-radius-sm);padding:1rem;cursor:pointer;">
         <div style="width:100%;height:6px;border-radius:3px;background:${t.defaultAccentColor};margin-bottom:0.6rem;"></div>
         <div style="font-weight:600;color:var(--text-primary);">${this.escapeHtml(t.label)}</div>
@@ -6776,7 +6938,7 @@ class ServerPanelApp {
             <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-server" style="color:var(--primary);margin-right:0.5rem;"></i>App Databases</h2>
             <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Real, separate databases for your own applications (e.g. WordPress) — not this panel's own data.</p>
           </div>
-          ${canWrite ? `<button class="btn btn-primary" onclick="app.showCreateCustomerDatabaseModal()"><i class="fas fa-plus"></i> New Database</button>` : ''}
+          ${canWrite ? `<button class="btn btn-primary" ${this.dc('showCreateCustomerDatabaseModal')}><i class="fas fa-plus"></i> New Database</button>` : ''}
         </div>
         <div class="card" style="padding:0;overflow:hidden;">
           <div style="overflow-x:auto;">
@@ -6802,8 +6964,8 @@ class ServerPanelApp {
             <small style="color:var(--text-muted);">Letters, numbers, underscores — must start with a letter.</small>
           </div>
           <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
-            <button class="btn" onclick="app.hideModal('customerdb-modal')">Cancel</button>
-            <button class="btn btn-primary" onclick="app.submitCustomerDatabase()"><i class="fas fa-check"></i> Create</button>
+            <button class="btn" ${this.dc('hideModal', 'customerdb-modal')}>Cancel</button>
+            <button class="btn btn-primary" ${this.dc('submitCustomerDatabase')}><i class="fas fa-check"></i> Create</button>
           </div>
         </div>
       </div>
@@ -6817,7 +6979,7 @@ class ServerPanelApp {
           <p style="color:var(--danger);font-size:0.8125rem;margin:0 0 1rem;">This password is shown once and cannot be retrieved again.</p>
           <div id="customerdb-credentials-content" style="background:#0d1117;color:#c9d1d9;font-family:monospace;font-size:0.8rem;padding:1rem;border-radius:var(--border-radius-sm);white-space:pre-wrap;word-break:break-all;"></div>
           <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
-            <button class="btn btn-primary" onclick="app.hideModal('customerdb-credentials-modal')">I've saved this</button>
+            <button class="btn btn-primary" ${this.dc('hideModal', 'customerdb-credentials-modal')}>I've saved this</button>
           </div>
         </div>
       </div>
@@ -6845,7 +7007,7 @@ class ServerPanelApp {
             <td class="mono" style="font-size:0.78rem;">${this.escapeHtml(db.host || '(local file)')}</td>
             <td>${statusBadge}</td>
             <td>
-              ${canWrite ? `<button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteCustomerDatabase(${db.id}, '${this.escapeHtml(db.db_name)}')"><i class="fas fa-trash"></i></button>` : ''}
+              ${canWrite ? `<button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" ${this.dc('deleteCustomerDatabase', db.id, db.db_name)}><i class="fas fa-trash"></i></button>` : ''}
             </td>
           </tr>`;
       }).join('');

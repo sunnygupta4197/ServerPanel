@@ -423,6 +423,23 @@
   color: var(--danger);
 }
 
+/* Replaces the several table-row onmouseenter/onmouseleave inline handlers
+   in app.js (data tables for domains, SSL certs, email accounts,
+   forwarders) — a plain :hover rule does the identical highlight with no
+   JS/inline-attribute involved at all, which is both simpler and doesn't
+   need any part of the CSP/data-click migration. */
+.hover-row:hover {
+  background: rgba(255,255,255,0.02);
+}
+
+/* Same idea, for the backup-type picker cards, which need a different
+   border color per card (a CSS custom property set inline per card is
+   the direct analog of what the removed onmouseenter/onmouseleave pair
+   was doing with this.style.borderColor). */
+.hover-border-card:hover {
+  border-color: var(--hover-border);
+}
+
 .btn-danger:hover {
   background: rgba(240,64,64,0.2);
   border-color: var(--danger);
