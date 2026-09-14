@@ -42,6 +42,7 @@ const terminalRoutes = require('./routes/terminal');
 const cronRoutes = require('./routes/cron');
 const ftpRoutes = require('./routes/ftp');
 const phpRoutes = require('./routes/php');
+const sitePublisherRoutes = require('./routes/sitePublisher');
 
 // Import socket handlers
 const socketHandlers = require('./sockets/socketHandlers');
@@ -213,6 +214,7 @@ class ServerPanelApp {
     this.app.use('/api/cron', authenticateToken, cronRoutes);
     this.app.use('/api/ftp', authenticateToken, ftpRoutes);
     this.app.use('/api/php', authenticateToken, phpRoutes);
+    this.app.use('/api/site-publisher', authenticateToken, sitePublisherRoutes);
 
     // Serve frontend for all routes (SPA)
     this.app.get('*', (req, res) => {

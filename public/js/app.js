@@ -476,7 +476,8 @@ class ServerPanelApp {
       applications: 'Applications',
       ftp: 'FTP Accounts',
       terminal: 'Terminal',
-      cron: 'Cron Jobs'
+      cron: 'Cron Jobs',
+      sitePublisher: 'Site Publisher'
     };
     return titles[page] || 'Unknown Page';
   }
@@ -523,6 +524,8 @@ class ServerPanelApp {
         return this.getTerminalPageContent();
       case 'cron':
         return this.getCronPageContent();
+      case 'sitePublisher':
+        return this.getSitePublisherPageContent();
       default:
         return `
           <div class="card" style="margin-top: 2rem;">
@@ -585,6 +588,9 @@ class ServerPanelApp {
         break;
       case 'cron':
         this.loadCronData();
+        break;
+      case 'sitePublisher':
+        this.loadSitePublisherData();
         break;
     }
   }
@@ -6511,6 +6517,220 @@ class ServerPanelApp {
     } catch (error) {
       console.error('Error deleting FTP account:', error);
       this.showToast('Failed to delete FTP account', 'error');
+    }
+  }
+
+  // =====================================================
+  // SITE PUBLISHER PAGE
+  // =====================================================
+  // cPanel-style "pick a template, fill in a few fields, publish" flow.
+  // sites:write (withheld from viewer, same as cron:safe) gates the
+  // Publish button; sites:read (everyone) covers browsing templates and
+  // rendering a preview, which never touches the filesystem.
+
+  getSitePublisherPageContent() {
+    const canPublish = this.currentUser?.role !== 'viewer';
+    return `
+      <div style="margin-top:1.5rem;">
+        <div>
+          <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-rocket" style="color:var(--primary);margin-right:0.5rem;"></i>Site Publisher</h2>
+          <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Pick a template, fill in a few fields, and publish it straight to a domain.${canPublish ? '' : ' (Read-only: viewers can preview but not publish.)'}</p>
+        </div>
+
+        <div class="card" style="margin-top:0.75rem;">
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Domain</label>
+            <select id="sp-domain" class="form-control" style="width:100%;max-width:360px;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" onchange="app.onSitePublisherDomainChange()">
+              <option value="">Loading…</option>
+            </select>
+          </div>
+          <div id="sp-status" style="font-size:0.8125rem;color:var(--text-muted);margin-bottom:0.5rem;"></div>
+        </div>
+
+        <div class="card" style="margin-top:0.75rem;">
+          <label style="color:var(--text-secondary);display:block;margin-bottom:0.6rem;">Template</label>
+          <div id="sp-templates" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:0.75rem;">
+            <div style="color:var(--text-muted);"><i class="fas fa-spinner fa-spin"></i> Loading templates…</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:0.75rem;">
+          <label style="color:var(--text-secondary);display:block;margin-bottom:0.6rem;">Content</label>
+          <div id="sp-fields"></div>
+          <div style="display:flex;gap:0.75rem;margin-top:1rem;">
+            <button class="btn" onclick="app.previewSitePublisher()"><i class="fas fa-eye"></i> Preview</button>
+            ${canPublish ? `<button class="btn btn-primary" onclick="app.publishSitePublisher()"><i class="fas fa-upload"></i> Publish</button>` : ''}
+          </div>
+        </div>
+      </div>
+
+      <!-- Preview Modal -->
+      <div id="sp-preview-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:900px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
+            <h3 style="color:var(--text-primary);margin:0;">Preview</h3>
+            <button class="btn" onclick="app.hideModal('sp-preview-modal')">Close</button>
+          </div>
+          <iframe id="sp-preview-frame" style="flex:1;min-height:60vh;width:100%;border:1px solid var(--border);border-radius:var(--border-radius-sm);background:#fff;" sandbox=""></iframe>
+        </div>
+      </div>
+    `;
+  }
+
+  async loadSitePublisherData() {
+    this._spTemplates = [];
+    this._spFieldsSchema = [];
+    this._spSelectedTemplate = null;
+
+    try {
+      const [domainsRes, templatesRes] = await Promise.all([
+        fetch('/api/domains'),
+        fetch('/api/site-publisher/templates')
+      ]);
+      const domainsData = await domainsRes.json();
+      const templatesData = await templatesRes.json();
+
+      const domainSelect = document.getElementById('sp-domain');
+      if (domainSelect) {
+        domainSelect.innerHTML = (domainsData.success && domainsData.data.length)
+          ? domainsData.data.map(d => `<option value="${d.id}">${this.escapeHtml(d.domain)}</option>`).join('')
+          : `<option value="">No domains — add one first</option>`;
+      }
+
+      if (templatesData.success) {
+        this._spTemplates = templatesData.data.templates;
+        this._spFieldsSchema = templatesData.data.fields;
+        this._renderSitePublisherTemplates();
+        if (this._spTemplates.length) this.selectSitePublisherTemplate(this._spTemplates[0].key);
+      }
+
+      this.onSitePublisherDomainChange();
+    } catch (error) {
+      console.error('Error loading site publisher data:', error);
+      this.showToast('Failed to load Site Publisher', 'error');
+    }
+  }
+
+  _renderSitePublisherTemplates() {
+    const container = document.getElementById('sp-templates');
+    if (!container) return;
+    container.innerHTML = this._spTemplates.map(t => `
+      <div class="sp-template-card" data-key="${t.key}" onclick="app.selectSitePublisherTemplate('${t.key}')"
+        style="border:2px solid var(--border);border-radius:var(--border-radius-sm);padding:1rem;cursor:pointer;">
+        <div style="width:100%;height:6px;border-radius:3px;background:${t.defaultAccentColor};margin-bottom:0.6rem;"></div>
+        <div style="font-weight:600;color:var(--text-primary);">${this.escapeHtml(t.label)}</div>
+        <div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem;">${this.escapeHtml(t.description)}</div>
+      </div>
+    `).join('');
+  }
+
+  selectSitePublisherTemplate(key) {
+    this._spSelectedTemplate = key;
+    document.querySelectorAll('.sp-template-card').forEach(el => {
+      el.style.borderColor = el.dataset.key === key ? 'var(--primary)' : 'var(--border)';
+    });
+    this._renderSitePublisherFields();
+  }
+
+  _renderSitePublisherFields() {
+    const container = document.getElementById('sp-fields');
+    if (!container) return;
+    const existing = this._spFieldValues || {};
+    container.innerHTML = this._spFieldsSchema.map(f => {
+      const value = this.escapeHtml(existing[f.key] || '');
+      if (f.type === 'textarea') {
+        return `
+          <div class="form-group" style="margin-bottom:0.85rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.35rem;font-size:0.8125rem;">${this.escapeHtml(f.label)}${f.required ? ' *' : ''}</label>
+            <textarea id="sp-field-${f.key}" rows="3" maxlength="${f.maxLength}" class="form-control" style="width:100%;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">${value}</textarea>
+          </div>`;
+      }
+      const inputType = f.type === 'color' ? 'text' : (f.type === 'email' ? 'email' : 'text');
+      const placeholder = f.type === 'color' ? '#6366f1 (leave blank for template default)' : '';
+      return `
+        <div class="form-group" style="margin-bottom:0.85rem;">
+          <label style="color:var(--text-secondary);display:block;margin-bottom:0.35rem;font-size:0.8125rem;">${this.escapeHtml(f.label)}${f.required ? ' *' : ''}</label>
+          <input id="sp-field-${f.key}" type="${inputType}" maxlength="${f.maxLength}" placeholder="${placeholder}" value="${value}" class="form-control" style="width:100%;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+        </div>`;
+    }).join('');
+  }
+
+  _collectSitePublisherFields() {
+    const fields = {};
+    for (const f of this._spFieldsSchema) {
+      const el = document.getElementById(`sp-field-${f.key}`);
+      if (el) fields[f.key] = el.value;
+    }
+    this._spFieldValues = fields;
+    return fields;
+  }
+
+  async onSitePublisherDomainChange() {
+    const domainSelect = document.getElementById('sp-domain');
+    const status = document.getElementById('sp-status');
+    if (!domainSelect || !status || !domainSelect.value) {
+      if (status) status.textContent = '';
+      return;
+    }
+    try {
+      const res = await fetch(`/api/site-publisher/status?domainId=${domainSelect.value}`);
+      const data = await res.json();
+      if (data.success && data.data) {
+        const published = data.data;
+        status.innerHTML = `<i class="fas fa-check-circle" style="color:var(--success);"></i> Currently published: <strong>${this.escapeHtml(published.template_key)}</strong> (${this.escapeHtml(published.filename)}) — ${new Date(published.published_at).toLocaleString()}`;
+      } else {
+        status.innerHTML = `<i class="fas fa-info-circle"></i> Nothing published to this domain yet.`;
+      }
+    } catch (error) {
+      console.error('Error loading site publisher status:', error);
+      status.textContent = '';
+    }
+  }
+
+  async previewSitePublisher() {
+    if (!this._spSelectedTemplate) return this.showToast('Select a template', 'error');
+    const fields = this._collectSitePublisherFields();
+    try {
+      const res = await fetch('/api/site-publisher/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ templateKey: this._spSelectedTemplate, fields })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('sp-preview-frame').srcdoc = data.data.html;
+        this.showModal('sp-preview-modal');
+      } else {
+        this.showToast(data.message || data.errors?.[0]?.message || 'Failed to render preview', 'error');
+      }
+    } catch (error) {
+      console.error('Error previewing site:', error);
+      this.showToast('Failed to render preview', 'error');
+    }
+  }
+
+  async publishSitePublisher() {
+    const domainSelect = document.getElementById('sp-domain');
+    if (!domainSelect?.value) return this.showToast('Select a domain', 'error');
+    if (!this._spSelectedTemplate) return this.showToast('Select a template', 'error');
+    const fields = this._collectSitePublisherFields();
+
+    try {
+      const res = await fetch('/api/site-publisher/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domainId: Number(domainSelect.value), templateKey: this._spSelectedTemplate, fields })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.showToast(data.message || 'Site published', 'success');
+        this.onSitePublisherDomainChange();
+      } else {
+        this.showToast(data.message || data.errors?.[0]?.message || 'Failed to publish site', 'error');
+      }
+    } catch (error) {
+      console.error('Error publishing site:', error);
+      this.showToast('Failed to publish site', 'error');
     }
   }
 

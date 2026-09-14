@@ -25,7 +25,8 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'apps:read', 'apps:install', 'apps:uninstall', 'apps:update', 'apps:configure',
     'ftp:read', 'ftp:write',
     'php:read', 'php:write',
-    'terminal:safe', 'cron:safe'
+    'terminal:safe', 'cron:safe',
+    'sites:read', 'sites:write'
   ],
   // A "user" here is a hosting customer managing their own account, not an
   // operator of the panel host itself — no system:write, services:*, or
@@ -42,7 +43,8 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'apps:read', 'apps:install', 'apps:uninstall',
     'ftp:read', 'ftp:write',
     'php:read', 'php:write',
-    'terminal:safe', 'cron:safe'
+    'terminal:safe', 'cron:safe',
+    'sites:read', 'sites:write'
   ],
   viewer: [
     'files:read',
@@ -58,7 +60,12 @@ const DEFAULT_ROLE_PERMISSIONS = {
     // Read-only diagnostics fit viewer's read-only nature; cron:safe
     // (scheduling something to run later) does not — that stays a
     // "user"/admin-only action.
-    'terminal:safe'
+    'terminal:safe',
+    // sites:read only — previewing a template renders HTML in memory and
+    // never touches the filesystem, so it's as read-only as it looks;
+    // sites:write (actually publishing to a document root) is withheld,
+    // same reasoning as cron:safe above.
+    'sites:read'
   ]
 };
 
