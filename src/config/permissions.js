@@ -22,7 +22,9 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'ssl:read', 'ssl:write',
     'email:read', 'email:write',
     'backups:read', 'backups:write',
-    'apps:read', 'apps:install', 'apps:uninstall', 'apps:update', 'apps:configure'
+    'apps:read', 'apps:install', 'apps:uninstall', 'apps:update', 'apps:configure',
+    'ftp:read', 'ftp:write',
+    'php:read', 'php:write'
   ],
   // A "user" here is a hosting customer managing their own account, not an
   // operator of the panel host itself — no system:write, services:*, or
@@ -36,7 +38,9 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'ssl:read', 'ssl:write',
     'email:read', 'email:write',
     'backups:read', 'backups:write',
-    'apps:read', 'apps:install', 'apps:uninstall'
+    'apps:read', 'apps:install', 'apps:uninstall',
+    'ftp:read', 'ftp:write',
+    'php:read', 'php:write'
   ],
   viewer: [
     'files:read',
@@ -46,7 +50,9 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'ssl:read',
     'email:read',
     'backups:read',
-    'apps:read'
+    'apps:read',
+    'ftp:read',
+    'php:read'
   ]
 };
 

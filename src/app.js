@@ -38,11 +38,16 @@ const sslRoutes = require('./routes/ssl');
 const emailRoutes = require('./routes/email');
 const backupRoutes = require('./routes/backups');
 const applicationRoutes = require('./routes/applications');
+const terminalRoutes = require('./routes/terminal');
+const cronRoutes = require('./routes/cron');
+const ftpRoutes = require('./routes/ftp');
+const phpRoutes = require('./routes/php');
 
 // Import socket handlers
 const socketHandlers = require('./sockets/socketHandlers');
 const jobQueue = require('./jobs/jobQueue');
 const backupScheduler = require('./jobs/backupScheduler');
+const cronJobRunner = require('./jobs/cronJobRunner');
 const acmeService = require('./services/acmeService');
 const settingsCache = require('./config/settingsCache');
 
@@ -204,6 +209,10 @@ class ServerPanelApp {
     this.app.use('/api/email', authenticateToken, emailRoutes);
     this.app.use('/api/backups', authenticateToken, backupRoutes);
     this.app.use('/api/applications', authenticateToken, applicationRoutes);
+    this.app.use('/api/terminal', authenticateToken, terminalRoutes);
+    this.app.use('/api/cron', authenticateToken, cronRoutes);
+    this.app.use('/api/ftp', authenticateToken, ftpRoutes);
+    this.app.use('/api/php', authenticateToken, phpRoutes);
 
     // Serve frontend for all routes (SPA)
     this.app.get('*', (req, res) => {
@@ -246,6 +255,19 @@ class ServerPanelApp {
     jobQueue.setIO(this.io);
     socketHandlers(this.io);
     backupScheduler.start();
+
+    // Unlike backupScheduler.start() (which only registers a poller whose
+    // callback doesn't run for another minute, by which point migrations
+    // have long since finished), cronJobRunner.start() queries cron_jobs
+    // immediately — so it genuinely needs to wait for dbInitPromise
+    // (migrations are fired-and-forgotten in the constructor, not awaited)
+    // rather than running synchronously right after it like everything
+    // else in this method. Without this it throws "no such table:
+    // cron_jobs" on every fresh-DB startup, racing the migration that
+    // creates it.
+    this.dbInitPromise
+      .then(() => cronJobRunner.start())
+      .catch(err => logger.error('Failed to start cron job runner:', err));
   }
 
   initializeErrorHandling() {

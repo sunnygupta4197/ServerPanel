@@ -4,6 +4,7 @@ const { body, param, validationResult } = require('express-validator');
 const { requirePermission } = require('../middleware/authMiddleware');
 const database = require('../config/database');
 const logger = require('../config/logger');
+const phpService = require('../services/phpService');
 
 // List all domains for authenticated user
 router.get('/', requirePermission('domains:read'), async (req, res) => {
@@ -132,6 +133,51 @@ router.put('/:id', requirePermission('domains:write'),
     } catch (err) {
       logger.error('Error updating domain:', err);
       res.status(500).json({ success: false, message: 'Failed to update domain' });
+    }
+  }
+);
+
+// Assign a PHP version to a domain. Persists domains.php_version
+// unconditionally (that's always real), and separately attempts a real
+// php-fpm pool activation when possible — see phpService.js for exactly
+// what "activated" does and doesn't mean here.
+router.put('/:id/php-version', requirePermission('php:write'),
+  [
+    param('id').isInt(),
+    body('php_version').isString().matches(/^\d+\.\d+$/).withMessage('Version must look like "8.2"')
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
+      const domain = await database('domains').where('id', req.params.id).first();
+      if (!domain) return res.status(404).json({ success: false, message: 'Domain not found' });
+      if (req.user.role !== 'admin' && domain.user_id !== req.user.id)
+        return res.status(403).json({ success: false, message: 'Access denied' });
+
+      const { php_version } = req.body;
+      const installation = await database('php_installations').where('version', php_version).first();
+      if (!installation) {
+        return res.status(400).json({ success: false, message: `PHP ${php_version} is not registered — see GET /api/php/versions` });
+      }
+
+      await database('domains').where('id', req.params.id).update({ php_version, updated_at: new Date() });
+
+      const activation = await phpService.activateDomainPhpVersion(
+        domain.domain, php_version, domain.document_root || `/var/www/${domain.domain}`
+      );
+
+      logger.info(`Domain ${domain.domain} PHP version set to ${php_version} by ${req.user.username}${activation.activated ? '' : ' (not yet activated: ' + activation.reason + ')'}`);
+
+      res.json({
+        success: true,
+        message: activation.activated ? `PHP ${php_version} assigned and activated` : `PHP ${php_version} assigned (${activation.reason})`,
+        data: { domainId: domain.id, php_version, activation }
+      });
+    } catch (err) {
+      logger.error('Error setting domain PHP version:', err);
+      res.status(500).json({ success: false, message: 'Failed to set PHP version' });
     }
   }
 );

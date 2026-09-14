@@ -330,6 +330,16 @@ class ServerPanelApp {
       this.initializeActivityPanel();
       this.initializeSocket();
       this.initializeCharts();
+
+      // Terminal/Cron are admin-only on the backend (requireRole('admin'),
+      // not a permission string — see terminal.js/cron.js) — hide the nav
+      // group entirely for non-admins rather than showing links that will
+      // just 403. The sidebar itself isn't otherwise role-aware, but these
+      // two are sensitive enough (direct shell access) to be worth the
+      // one-off treatment.
+      const adminNavGroup = document.getElementById('nav-group-admin');
+      if (adminNavGroup) adminNavGroup.style.display = this.currentUser?.role === 'admin' ? '' : 'none';
+
       const lastPage = localStorage.getItem('sp_page') || 'dashboard';
       this.navigateToPage(lastPage);
       this.startPeriodicUpdates();
@@ -463,7 +473,10 @@ class ServerPanelApp {
       ssl: 'SSL / TLS Certificates',
       email: 'Email Management',
       backups: 'Backup & Restore',
-      applications: 'Applications'
+      applications: 'Applications',
+      ftp: 'FTP Accounts',
+      terminal: 'Terminal',
+      cron: 'Cron Jobs'
     };
     return titles[page] || 'Unknown Page';
   }
@@ -504,6 +517,12 @@ class ServerPanelApp {
         return this.getBackupsPageContent();
       case 'applications':
         return this.getApplicationsPageContent();
+      case 'ftp':
+        return this.getFtpPageContent();
+      case 'terminal':
+        return this.getTerminalPageContent();
+      case 'cron':
+        return this.getCronPageContent();
       default:
         return `
           <div class="card" style="margin-top: 2rem;">
@@ -557,6 +576,15 @@ class ServerPanelApp {
         break;
       case 'applications':
         this.loadApplicationsData();
+        break;
+      case 'ftp':
+        this.loadFtpData();
+        break;
+      case 'terminal':
+        this.loadTerminalData();
+        break;
+      case 'cron':
+        this.loadCronData();
         break;
     }
   }
@@ -4648,8 +4676,11 @@ class ServerPanelApp {
 
   async loadDomainsData() {
     try {
-      const res = await fetch('/api/domains');
+      const [res, phpRes] = await Promise.all([fetch('/api/domains'), fetch('/api/php/versions')]);
       const data = await res.json();
+      const phpData = await phpRes.json();
+      this._phpVersions = phpData.success ? phpData.data : [];
+
       const list = document.getElementById('domains-list');
       if (!list) return;
       if (!data.success || !data.data.length) {
@@ -4663,6 +4694,7 @@ class ServerPanelApp {
               <th style="padding:1rem 1.25rem;text-align:left;color:var(--text-secondary);font-weight:500;font-size:0.8125rem;text-transform:uppercase;">Domain</th>
               <th style="padding:1rem;text-align:left;color:var(--text-secondary);font-weight:500;font-size:0.8125rem;text-transform:uppercase;">Type</th>
               <th style="padding:1rem;text-align:left;color:var(--text-secondary);font-weight:500;font-size:0.8125rem;text-transform:uppercase;">Status</th>
+              <th style="padding:1rem;text-align:left;color:var(--text-secondary);font-weight:500;font-size:0.8125rem;text-transform:uppercase;">PHP</th>
               <th style="padding:1rem;text-align:left;color:var(--text-secondary);font-weight:500;font-size:0.8125rem;text-transform:uppercase;">DNS Records</th>
               <th style="padding:1rem;text-align:right;color:var(--text-secondary);font-weight:500;font-size:0.8125rem;text-transform:uppercase;">Actions</th>
             </tr>
@@ -4676,6 +4708,11 @@ class ServerPanelApp {
                 </td>
                 <td style="padding:1rem;"><span style="padding:0.25rem 0.6rem;background:rgba(99,102,241,0.15);color:#818cf8;border-radius:12px;font-size:0.75rem;font-weight:600;">${d.type}</span></td>
                 <td style="padding:1rem;"><span style="padding:0.25rem 0.6rem;background:${d.status==='active'?'rgba(16,185,129,0.15)':'rgba(239,68,68,0.15)'};color:${d.status==='active'?'#34d399':'#f87171'};border-radius:12px;font-size:0.75rem;font-weight:600;">${d.status}</span></td>
+                <td style="padding:1rem;">
+                  <button class="btn btn-sm" onclick="app.showPhpVersionModal(${d.id}, '${this.escapeHtml(d.domain)}', '${this.escapeHtml(d.php_version || '')}')">
+                    ${d.php_version ? this.escapeHtml(d.php_version) : '<span style="color:var(--text-muted);">Not set</span>'}
+                  </button>
+                </td>
                 <td style="padding:1rem;color:var(--text-secondary);">${d.dns_record_count} records</td>
                 <td style="padding:1rem;text-align:right;">
                   <button class="btn btn-sm" onclick="app.showDNSEditor(${d.id}, '${this.escapeHtml(d.domain)}')" title="Manage DNS"><i class="fas fa-database"></i></button>
@@ -4688,6 +4725,53 @@ class ServerPanelApp {
     } catch (err) {
       console.error('Error loading domains:', err);
       this.showToast('Failed to load domains', 'error');
+    }
+  }
+
+  showPhpVersionModal(domainId, domainName, currentVersion) {
+    const versions = this._phpVersions || [];
+    const modalHtml = `
+      <div class="modal active" id="php-version-modal">
+        <div class="modal-content" style="max-width:420px;">
+          <h3 style="color:var(--text-primary);margin:0 0 1.25rem;">PHP Version — ${this.escapeHtml(domainName)}</h3>
+          ${versions.length ? `
+            <div class="form-group" style="margin-bottom:1.5rem;">
+              <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Version</label>
+              <select id="php-version-select" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+                ${versions.map(v => `<option value="${this.escapeHtml(v.version)}" ${v.version === currentVersion ? 'selected' : ''}>PHP ${this.escapeHtml(v.version)}${v.is_detected ? ' (detected)' : ''}</option>`).join('')}
+              </select>
+            </div>
+          ` : `
+            <p style="color:var(--text-secondary);font-size:0.875rem;">No PHP versions are registered yet. An admin can register one via <code>POST /api/php/versions</code>, or trigger auto-detection on a Linux host.</p>
+          `}
+          <div style="display:flex;justify-content:flex-end;gap:0.75rem;">
+            <button class="btn" onclick="app.closeModal('php-version-modal')">Cancel</button>
+            ${versions.length ? `<button class="btn btn-primary" onclick="app.submitPhpVersion(${domainId})">Save</button>` : ''}
+          </div>
+        </div>
+      </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+  }
+
+  async submitPhpVersion(domainId) {
+    const version = document.getElementById('php-version-select').value;
+    try {
+      const res = await fetch(`/api/domains/${domainId}/php-version`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ php_version: version })
+      });
+      const data = await res.json();
+      this.closeModal('php-version-modal');
+      if (res.ok) {
+        this.showToast(data.message || 'PHP version updated', 'success');
+        this.loadDomainsData();
+      } else {
+        this.showToast(data.message || 'Failed to set PHP version', 'error');
+      }
+    } catch (error) {
+      console.error('Error setting PHP version:', error);
+      this.showToast('Failed to set PHP version', 'error');
     }
   }
 
@@ -5600,6 +5684,512 @@ class ServerPanelApp {
     } catch (err) {
       console.error('Error uninstalling application:', err);
       this.showToast('Failed to start uninstall', 'error');
+    }
+  }
+
+  // =====================================================
+  // TERMINAL PAGE (admin-only)
+  // =====================================================
+
+  getTerminalPageContent() {
+    return `
+      <div style="margin-top:1.5rem;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
+          <div>
+            <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-terminal" style="color:var(--primary);margin-right:0.5rem;"></i>Terminal</h2>
+            <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Admin-only. Every command is logged.</p>
+          </div>
+          <button class="btn btn-sm" onclick="app.loadTerminalHistory()"><i class="fas fa-history"></i> History</button>
+        </div>
+        <div class="card" style="padding:0;overflow:hidden;">
+          <div id="terminal-output" style="background:#0d1117;color:#c9d1d9;font-family:'Consolas','Courier New',monospace;font-size:0.8125rem;padding:1rem;height:420px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;">Connected. Type a command below and press Enter.
+</div>
+          <div style="display:flex;align-items:center;gap:0.5rem;padding:0.6rem 1rem;background:#161b22;border-top:1px solid var(--border);">
+            <span id="terminal-cwd-label" style="color:#58a6ff;font-family:monospace;font-size:0.8125rem;white-space:nowrap;"></span>
+            <input id="terminal-input" type="text" autocomplete="off" spellcheck="false"
+              style="flex:1;background:transparent;border:none;outline:none;color:#c9d1d9;font-family:monospace;font-size:0.8125rem;"
+              placeholder="Type a command…">
+          </div>
+        </div>
+      </div>
+
+      <!-- Terminal History Modal -->
+      <div id="terminal-history-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:640px;max-width:95vw;max-height:80vh;overflow-y:auto;">
+          <h3 style="color:var(--text-primary);margin-bottom:1rem;">Recent Commands</h3>
+          <div id="terminal-history-list"></div>
+          <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
+            <button class="btn" onclick="app.hideModal('terminal-history-modal')">Close</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  loadTerminalData() {
+    this._terminalCwd = null;
+    this._terminalHistory = [];
+    this._terminalHistoryIndex = -1;
+
+    const input = document.getElementById('terminal-input');
+    if (!input) return;
+    input.focus();
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.runTerminalCommand();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        this._navigateTerminalHistory(-1);
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        this._navigateTerminalHistory(1);
+      }
+    });
+
+    // Establish the initial cwd label without running a real command.
+    this._terminalAppendLine('');
+  }
+
+  _navigateTerminalHistory(direction) {
+    if (!this._terminalHistory.length) return;
+    this._terminalHistoryIndex = Math.min(
+      Math.max(this._terminalHistoryIndex + direction, 0),
+      this._terminalHistory.length
+    );
+    const input = document.getElementById('terminal-input');
+    input.value = this._terminalHistory[this._terminalHistoryIndex] || '';
+  }
+
+  _terminalAppendLine(text) {
+    const output = document.getElementById('terminal-output');
+    if (!output) return;
+    output.textContent += text;
+    output.scrollTop = output.scrollHeight;
+  }
+
+  async runTerminalCommand() {
+    const input = document.getElementById('terminal-input');
+    const command = input.value;
+    if (!command.trim()) return;
+
+    this._terminalHistory.push(command);
+    this._terminalHistoryIndex = this._terminalHistory.length;
+    input.value = '';
+
+    const cwdLabel = this._terminalCwd || '';
+    this._terminalAppendLine(`\n${cwdLabel}> ${command}\n`);
+
+    try {
+      const res = await fetch('/api/terminal/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, cwd: this._terminalCwd || undefined })
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        this._terminalCwd = data.data.cwd;
+        document.getElementById('terminal-cwd-label').textContent = this._terminalCwd + '>';
+        if (data.data.stdout) this._terminalAppendLine(data.data.stdout);
+        if (data.data.stderr) this._terminalAppendLine(data.data.stderr);
+        if (data.data.truncated) this._terminalAppendLine('\n[output truncated]\n');
+        if (data.data.timedOut) this._terminalAppendLine('\n[command timed out and was killed]\n');
+        if (data.data.exitCode !== 0 && data.data.exitCode !== undefined) {
+          this._terminalAppendLine(`\n[exit code ${data.data.exitCode}]\n`);
+        }
+      } else {
+        this._terminalAppendLine(`\n${data.message || 'Command failed'}\n`);
+      }
+    } catch (error) {
+      console.error('Error running terminal command:', error);
+      this._terminalAppendLine('\n[connection error]\n');
+    }
+  }
+
+  async loadTerminalHistory() {
+    try {
+      const res = await fetch('/api/terminal/history?limit=50');
+      const data = await res.json();
+      const list = document.getElementById('terminal-history-list');
+      if (!data.success || !data.data.length) {
+        list.innerHTML = `<p style="color:var(--text-muted);text-align:center;padding:1.5rem;">No commands run yet.</p>`;
+      } else {
+        list.innerHTML = data.data.map(entry => `
+          <div style="padding:0.5rem 0;border-bottom:1px solid var(--border);font-family:monospace;font-size:0.78rem;">
+            <div style="color:var(--text-muted);font-size:0.7rem;">${new Date(entry.performedAt).toLocaleString()} · ${this.escapeHtml(entry.details.cwd || '')}</div>
+            <div style="color:var(--text-primary);word-break:break-word;">${this.escapeHtml(entry.details.command || '')}</div>
+          </div>
+        `).join('');
+      }
+      this.showModal('terminal-history-modal');
+    } catch (error) {
+      console.error('Error loading terminal history:', error);
+      this.showToast('Failed to load terminal history', 'error');
+    }
+  }
+
+  // =====================================================
+  // CRON JOBS PAGE (admin-only)
+  // =====================================================
+
+  getCronPageContent() {
+    return `
+      <div style="margin-top:1.5rem;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+          <div>
+            <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-clock" style="color:var(--primary);margin-right:0.5rem;"></i>Cron Jobs</h2>
+            <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Admin-only scheduled commands.</p>
+          </div>
+          <button class="btn btn-primary" onclick="app.showCreateCronModal()"><i class="fas fa-plus"></i> New Job</button>
+        </div>
+        <div class="card" style="padding:0;overflow:hidden;">
+          <div style="overflow-x:auto;">
+            <table class="svc-table">
+              <thead>
+                <tr><th>Name</th><th>Schedule</th><th>Command</th><th>Status</th><th>Last Run</th><th>Actions</th></tr>
+              </thead>
+              <tbody id="cron-tbody">
+                <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted);"><i class="fas fa-spinner fa-spin" style="margin-right:0.5rem;"></i>Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Create/Edit Cron Job Modal -->
+      <div id="cron-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:480px;max-width:95vw;">
+          <h3 id="cron-modal-title" style="color:var(--text-primary);margin-bottom:1.25rem;">New Cron Job</h3>
+          <input id="cron-job-id" type="hidden">
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Name</label>
+            <input id="cron-name" type="text" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Schedule (cron expression)</label>
+            <input id="cron-schedule" type="text" placeholder="*/5 * * * *" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;font-family:monospace;">
+            <small style="color:var(--text-muted);">minute hour day month weekday — e.g. <code>0 2 * * *</code> = daily at 2am</small>
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Command</label>
+            <textarea id="cron-command" rows="3" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;font-family:monospace;font-size:0.8rem;"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:1.5rem;display:flex;align-items:center;gap:0.6rem;">
+            <input id="cron-active" type="checkbox" checked style="width:auto;">
+            <label style="color:var(--text-secondary);margin:0;">Active</label>
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+            <button class="btn" onclick="app.hideModal('cron-modal')">Cancel</button>
+            <button class="btn btn-primary" onclick="app.submitCronJob()"><i class="fas fa-check"></i> Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Job output viewer -->
+      <div id="cron-output-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:600px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1rem;">Last Run Output</h3>
+          <pre id="cron-output-content" style="background:#0d1117;color:#c9d1d9;padding:1rem;border-radius:var(--border-radius-sm);max-height:400px;overflow:auto;font-size:0.78rem;white-space:pre-wrap;word-break:break-word;"></pre>
+          <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
+            <button class="btn" onclick="app.hideModal('cron-output-modal')">Close</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async loadCronData() {
+    try {
+      const res = await fetch('/api/cron');
+      const data = await res.json();
+      const tbody = document.getElementById('cron-tbody');
+      if (!data.success || !data.data.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted);">No cron jobs yet.</td></tr>`;
+        return;
+      }
+      this._cronJobs = data.data;
+      tbody.innerHTML = data.data.map(job => {
+        const statusBadge = job.is_active ? `<span class="badge badge-success">Active</span>` : `<span class="badge badge-muted">Paused</span>`;
+        const lastRun = job.last_run_at
+          ? `<span style="color:${job.last_exit_code === 0 ? 'var(--success)' : 'var(--danger)'};">${new Date(job.last_run_at).toLocaleString()}</span>`
+          : '<span style="color:var(--text-muted);">Never</span>';
+        return `
+          <tr>
+            <td style="font-weight:500;color:var(--text-primary);">${this.escapeHtml(job.name)}</td>
+            <td class="mono" style="font-size:0.78rem;">${this.escapeHtml(job.schedule)}</td>
+            <td class="mono" style="font-size:0.75rem;color:var(--text-secondary);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${this.escapeHtml(job.command)}">${this.escapeHtml(job.command)}</td>
+            <td>${statusBadge}</td>
+            <td style="font-size:0.75rem;">${lastRun}</td>
+            <td>
+              <div style="display:flex;gap:0.25rem;">
+                <button class="btn btn-icon btn-sm" title="Run Now" onclick="app.runCronJobNow(${job.id})"><i class="fas fa-play"></i></button>
+                <button class="btn btn-icon btn-sm" title="View Output" onclick="app.showCronOutput(${job.id})"><i class="fas fa-align-left"></i></button>
+                <button class="btn btn-icon btn-sm" title="Edit" onclick="app.showEditCronModal(${job.id})"><i class="fas fa-pencil-alt"></i></button>
+                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteCronJob(${job.id}, '${this.escapeHtml(job.name)}')"><i class="fas fa-trash"></i></button>
+              </div>
+            </td>
+          </tr>`;
+      }).join('');
+    } catch (error) {
+      console.error('Error loading cron jobs:', error);
+      this.showToast('Failed to load cron jobs', 'error');
+    }
+  }
+
+  showCreateCronModal() {
+    document.getElementById('cron-modal-title').textContent = 'New Cron Job';
+    document.getElementById('cron-job-id').value = '';
+    document.getElementById('cron-name').value = '';
+    document.getElementById('cron-schedule').value = '';
+    document.getElementById('cron-command').value = '';
+    document.getElementById('cron-active').checked = true;
+    this.showModal('cron-modal');
+  }
+
+  showEditCronModal(jobId) {
+    const job = (this._cronJobs || []).find(j => j.id === jobId);
+    if (!job) return;
+    document.getElementById('cron-modal-title').textContent = 'Edit Cron Job';
+    document.getElementById('cron-job-id').value = job.id;
+    document.getElementById('cron-name').value = job.name;
+    document.getElementById('cron-schedule').value = job.schedule;
+    document.getElementById('cron-command').value = job.command;
+    document.getElementById('cron-active').checked = !!job.is_active;
+    this.showModal('cron-modal');
+  }
+
+  async submitCronJob() {
+    const id = document.getElementById('cron-job-id').value;
+    const payload = {
+      name: document.getElementById('cron-name').value.trim(),
+      schedule: document.getElementById('cron-schedule').value.trim(),
+      command: document.getElementById('cron-command').value,
+      is_active: document.getElementById('cron-active').checked
+    };
+    if (!payload.name || !payload.schedule || !payload.command) {
+      return this.showToast('Name, schedule, and command are required', 'error');
+    }
+
+    try {
+      const res = await fetch(id ? `/api/cron/${id}` : '/api/cron', {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('cron-modal');
+        this.showToast(data.message || 'Cron job saved', 'success');
+        this.loadCronData();
+      } else {
+        this.showToast(data.message || data.errors?.[0]?.msg || 'Failed to save cron job', 'error');
+      }
+    } catch (error) {
+      console.error('Error saving cron job:', error);
+      this.showToast('Failed to save cron job', 'error');
+    }
+  }
+
+  async runCronJobNow(jobId) {
+    try {
+      const res = await fetch(`/api/cron/${jobId}/run`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        this.showToast('Job started — refreshing in a moment…', 'info');
+        setTimeout(() => this.loadCronData(), 1500);
+      } else {
+        this.showToast(data.message || 'Failed to run job', 'error');
+      }
+    } catch (error) {
+      console.error('Error running cron job:', error);
+      this.showToast('Failed to run job', 'error');
+    }
+  }
+
+  showCronOutput(jobId) {
+    const job = (this._cronJobs || []).find(j => j.id === jobId);
+    if (!job) return;
+    document.getElementById('cron-output-content').textContent = job.last_output || '(no output yet — run the job first)';
+    this.showModal('cron-output-modal');
+  }
+
+  async deleteCronJob(jobId, name) {
+    if (!confirm(`Delete cron job "${name}"?`)) return;
+    try {
+      const res = await fetch(`/api/cron/${jobId}`, { method: 'DELETE' });
+      if (res.ok) { this.showToast('Cron job deleted', 'success'); this.loadCronData(); }
+      else this.showToast('Failed to delete cron job', 'error');
+    } catch (error) {
+      console.error('Error deleting cron job:', error);
+      this.showToast('Failed to delete cron job', 'error');
+    }
+  }
+
+  // =====================================================
+  // FTP ACCOUNTS PAGE
+  // =====================================================
+
+  getFtpPageContent() {
+    return `
+      <div style="margin-top:1.5rem;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+          <div>
+            <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-exchange-alt" style="color:var(--primary);margin-right:0.5rem;"></i>FTP Accounts</h2>
+            <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Manage FTP accounts and their home directories.</p>
+          </div>
+          <button class="btn btn-primary" onclick="app.showCreateFtpModal()"><i class="fas fa-plus"></i> Add Account</button>
+        </div>
+        <div id="ftp-activation-banner"></div>
+        <div class="card" style="padding:0;overflow:hidden;">
+          <div style="overflow-x:auto;">
+            <table class="svc-table">
+              <thead>
+                <tr><th>Username</th><th>Domain</th><th>Home Directory</th><th>Quota</th><th>Status</th><th>Actions</th></tr>
+              </thead>
+              <tbody id="ftp-tbody">
+                <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted);"><i class="fas fa-spinner fa-spin" style="margin-right:0.5rem;"></i>Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Create FTP Account Modal -->
+      <div id="ftp-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:460px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">Add FTP Account</h3>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Username</label>
+            <input id="ftp-username" type="text" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Password</label>
+            <input id="ftp-password" type="password" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Domain (optional)</label>
+            <select id="ftp-domain" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+              <option value="">— none —</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Home Directory (optional override)</label>
+            <input id="ftp-home-dir" type="text" placeholder="Defaults to the domain's document root" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+          </div>
+          <div class="form-group" style="margin-bottom:1.5rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Quota (MB)</label>
+            <input id="ftp-quota" type="number" value="1024" min="0" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+            <button class="btn" onclick="app.hideModal('ftp-modal')">Cancel</button>
+            <button class="btn btn-primary" onclick="app.submitCreateFtp()"><i class="fas fa-plus"></i> Create</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async loadFtpData() {
+    try {
+      const [accountsRes, domainsRes, setupRes] = await Promise.all([
+        fetch('/api/ftp/accounts'),
+        fetch('/api/domains'),
+        fetch('/api/ftp/setup-instructions')
+      ]);
+      const accountsData = await accountsRes.json();
+      const domainsData = await domainsRes.json();
+      const setupData = await setupRes.json();
+
+      const domainSelect = document.getElementById('ftp-domain');
+      if (domainSelect && domainsData.success) {
+        domainSelect.innerHTML = '<option value="">— none —</option>' +
+          domainsData.data.map(d => `<option value="${d.id}">${this.escapeHtml(d.domain)}</option>`).join('');
+      }
+
+      const banner = document.getElementById('ftp-activation-banner');
+      if (banner && setupData.success && !setupData.data.support.available) {
+        banner.innerHTML = `
+          <div class="card" style="margin-bottom:1rem;border-left:3px solid var(--warning);">
+            <strong style="color:var(--text-primary);"><i class="fas fa-info-circle" style="color:var(--warning);margin-right:0.4rem;"></i>Accounts are saved but not yet live on an FTP server</strong>
+            <p style="color:var(--text-secondary);font-size:0.8125rem;margin:0.4rem 0 0;">${this.escapeHtml(setupData.data.support.reason || '')}. One-time setup is required on the host — see the backend's ftpService.js for the exact vsftpd/PAM configuration to apply.</p>
+          </div>`;
+      } else if (banner) {
+        banner.innerHTML = '';
+      }
+
+      const tbody = document.getElementById('ftp-tbody');
+      if (!accountsData.success || !accountsData.data.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted);">No FTP accounts yet.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = accountsData.data.map(acc => `
+        <tr>
+          <td style="font-weight:500;color:var(--text-primary);">${this.escapeHtml(acc.username)}</td>
+          <td>${this.escapeHtml(acc.domain_name || '—')}</td>
+          <td class="mono" style="font-size:0.75rem;color:var(--text-secondary);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${this.escapeHtml(acc.home_dir)}">${this.escapeHtml(acc.home_dir)}</td>
+          <td class="mono" style="font-size:0.75rem;">${acc.quota_mb} MB</td>
+          <td>
+            ${acc.is_active ? '<span class="badge badge-success">Active</span>' : '<span class="badge badge-muted">Disabled</span>'}
+            ${acc.activated ? '<span class="badge badge-info" title="Live on the FTP server">Live</span>' : '<span class="badge badge-muted" title="Not yet activated on the FTP server">Not live</span>'}
+          </td>
+          <td>
+            <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteFtpAccount(${acc.id}, '${this.escapeHtml(acc.username)}')"><i class="fas fa-trash"></i></button>
+          </td>
+        </tr>`).join('');
+    } catch (error) {
+      console.error('Error loading FTP accounts:', error);
+      this.showToast('Failed to load FTP accounts', 'error');
+    }
+  }
+
+  showCreateFtpModal() {
+    document.getElementById('ftp-username').value = '';
+    document.getElementById('ftp-password').value = '';
+    document.getElementById('ftp-domain').value = '';
+    document.getElementById('ftp-home-dir').value = '';
+    document.getElementById('ftp-quota').value = '1024';
+    this.showModal('ftp-modal');
+  }
+
+  async submitCreateFtp() {
+    const username = document.getElementById('ftp-username').value.trim();
+    const password = document.getElementById('ftp-password').value;
+    const domain_id = document.getElementById('ftp-domain').value || undefined;
+    const home_dir = document.getElementById('ftp-home-dir').value.trim() || undefined;
+    const quota_mb = parseInt(document.getElementById('ftp-quota').value, 10) || 1024;
+
+    if (!username || !password) return this.showToast('Username and password are required', 'error');
+
+    try {
+      const res = await fetch('/api/ftp/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, domain_id, home_dir, quota_mb })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('ftp-modal');
+        this.showToast(data.message || 'FTP account created', 'success');
+        this.loadFtpData();
+      } else {
+        this.showToast(data.message || data.errors?.[0]?.msg || 'Failed to create FTP account', 'error');
+      }
+    } catch (error) {
+      console.error('Error creating FTP account:', error);
+      this.showToast('Failed to create FTP account', 'error');
+    }
+  }
+
+  async deleteFtpAccount(id, username) {
+    if (!confirm(`Delete FTP account "${username}"?`)) return;
+    try {
+      const res = await fetch(`/api/ftp/accounts/${id}`, { method: 'DELETE' });
+      if (res.ok) { this.showToast('FTP account deleted', 'success'); this.loadFtpData(); }
+      else this.showToast('Failed to delete FTP account', 'error');
+    } catch (error) {
+      console.error('Error deleting FTP account:', error);
+      this.showToast('Failed to delete FTP account', 'error');
     }
   }
 

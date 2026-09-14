@@ -74,6 +74,7 @@
           <li><a href="#" class="nav-link" data-page="domains"><i class="fas fa-globe"></i><span>Domains</span></a></li>
           <li><a href="#" class="nav-link" data-page="ssl"><i class="fas fa-lock"></i><span>SSL / TLS</span></a></li>
           <li><a href="#" class="nav-link" data-page="email"><i class="fas fa-envelope"></i><span>Email</span></a></li>
+          <li><a href="#" class="nav-link" data-page="ftp"><i class="fas fa-exchange-alt"></i><span>FTP Accounts</span></a></li>
           <li><a href="#" class="nav-link" data-page="backups"><i class="fas fa-archive"></i><span>Backups</span></a></li>
           <li><a href="#" class="nav-link" data-page="applications"><i class="fas fa-th-large"></i><span>Applications</span></a></li>
         </ul>
@@ -85,6 +86,14 @@
           <li><a href="#" class="nav-link" data-page="database"><i class="fas fa-database"></i><span>Databases</span></a></li>
           <li><a href="#" class="nav-link" data-page="users"><i class="fas fa-users"></i><span>Users</span></a></li>
           <li><a href="#" class="nav-link" data-page="settings"><i class="fas fa-sliders-h"></i><span>Settings</span></a></li>
+        </ul>
+      </div>
+      <!-- Admin-only: hidden for non-admin roles by app.js after login -->
+      <div class="nav-group" id="nav-group-admin">
+        <div class="nav-group-label">Admin</div>
+        <ul class="nav-menu">
+          <li><a href="#" class="nav-link" data-page="terminal"><i class="fas fa-terminal"></i><span>Terminal</span></a></li>
+          <li><a href="#" class="nav-link" data-page="cron"><i class="fas fa-clock"></i><span>Cron Jobs</span></a></li>
         </ul>
       </div>
     </nav>
