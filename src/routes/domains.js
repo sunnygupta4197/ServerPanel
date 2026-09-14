@@ -7,6 +7,7 @@ const logger = require('../config/logger');
 const phpService = require('../services/phpService');
 const dnsService = require('../services/dnsService');
 const mailService = require('../services/mailService');
+const cronJobRunner = require('../jobs/cronJobRunner');
 
 // Rewrites domain's zone file from its current dns_records and applies it
 // (best-effort — see dnsService.syncBindZone). Called after any DNS
@@ -211,16 +212,29 @@ router.delete('/:id', requirePermission('domains:write'),
       if (req.user.role !== 'admin' && domain.user_id !== req.user.id)
         return res.status(403).json({ success: false, message: 'Access denied' });
 
-      // dns_records and email_accounts both CASCADE-delete at the DB level
-      // when their domain_id's parent row disappears (see
-      // migrations/fix_hosting_schemas.js) — that's a plain FK cascade
-      // inside the database engine, so it runs no application code at
-      // all. Left alone, that means a deleted domain's real BIND zone and
-      // Postfix/Dovecot mailboxes would keep working on the real servers
-      // indefinitely: nothing ever told them the accounts/records are
-      // gone. Tear both down explicitly, after the delete, so what's
-      // actually being served matches what the app now shows.
+      // dns_records, email_accounts, and any domain-scoped cron_jobs (see
+      // migrations/scheduled_cron_jobs_safe_actions.js) all CASCADE-delete
+      // at the DB level when their domain_id's parent row disappears —
+      // that's a plain FK cascade inside the database engine, so it runs
+      // no application code at all. Left alone, that means a deleted
+      // domain's real BIND zone and Postfix/Dovecot mailboxes would keep
+      // working on the real servers indefinitely (nothing ever told them
+      // the accounts/records are gone), and any cron job scoped to this
+      // domain would keep firing on schedule forever — its DB row is
+      // gone, but cronJobRunner.js's in-memory node-cron task was never
+      // told to stop; runJob() would just silently no-op every time it
+      // fires (see cronJobRunner.js: `if (!job...) return;`), which
+      // doesn't error but leaks a timer for the life of the process.
+      // Fetch what needs that explicit cleanup before deleting — the
+      // cascade removes the rows that would otherwise tell us what to
+      // clean up.
+      const domainCronJobs = await database('cron_jobs').where('domain_id', domain.id);
+
       await database('domains').where('id', req.params.id).delete();
+
+      for (const job of domainCronJobs) {
+        cronJobRunner.unregister(job.id);
+      }
 
       await dnsService.removeZone(domain.domain).catch(err =>
         logger.warn(`DNS zone cleanup failed for deleted domain ${domain.domain}:`, err.message));

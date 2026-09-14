@@ -15,21 +15,32 @@
  * value; only the "who" reference is cleared for a deleted user.
  *
  * SQLite can't ALTER a column's constraint in place — dropping and
- * re-adding the column (rather than a full table rebuild) is enough here
- * since existing values are preserved by nobody re-populating them
- * (updated_by naturally gets refreshed the next time anyone saves that
- * setting anyway).
+ * re-adding the column is the only way to change it, but a plain drop
+ * silently destroys every existing row's value in that column, which a
+ * first pass at this migration did (caught live: inserted a real
+ * updated_by value, ran the migration, the value was gone). Captured
+ * here before the drop and restored by id afterward, so upgrading a
+ * database that already has real server_configs rows doesn't lose which
+ * user last touched each one.
  */
 exports.up = async function (knex) {
   const hasColumn = await knex.schema.hasColumn('server_configs', 'updated_by');
   if (hasColumn) {
+    const existing = await knex('server_configs').whereNotNull('updated_by').select('id', 'updated_by');
     await knex.schema.alterTable('server_configs', function (table) {
       table.dropColumn('updated_by');
     });
+    await knex.schema.alterTable('server_configs', function (table) {
+      table.integer('updated_by').unsigned().references('id').inTable('users').onDelete('SET NULL');
+    });
+    for (const row of existing) {
+      await knex('server_configs').where('id', row.id).update({ updated_by: row.updated_by });
+    }
+  } else {
+    await knex.schema.alterTable('server_configs', function (table) {
+      table.integer('updated_by').unsigned().references('id').inTable('users').onDelete('SET NULL');
+    });
   }
-  await knex.schema.alterTable('server_configs', function (table) {
-    table.integer('updated_by').unsigned().references('id').inTable('users').onDelete('SET NULL');
-  });
 };
 
 exports.down = async function (knex) {

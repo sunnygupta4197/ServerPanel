@@ -12,6 +12,7 @@ const dnsService = require('../services/dnsService');
 const mailService = require('../services/mailService');
 const ftpService = require('../services/ftpService');
 const customerDatabaseService = require('../services/customerDatabaseService');
+const cronJobRunner = require('../jobs/cronJobRunner');
 
 // Rejects any permission string that isn't one the app actually grants
 // anywhere (src/config/permissions.js) — previously permissions() was
@@ -423,10 +424,24 @@ router.delete('/:id',
       // us what to clean up.
       const ownedDomains = await database('domains').where('user_id', id);
       const ownedDatabases = await database('customer_databases').where('user_id', id);
+      // Cron jobs this user created directly, plus any (created by
+      // someone else, e.g. an admin) scoped to one of this user's own
+      // domains — both cascade away at the DB level below, and both need
+      // their in-memory node-cron task explicitly stopped (see
+      // domains.js's DELETE /:id for the full reasoning — same gap).
+      const domainIds = ownedDomains.map(d => d.id);
+      const ownCreatedCronJobs = await database('cron_jobs').where('created_by', id);
+      const domainScopedCronJobs = domainIds.length
+        ? await database('cron_jobs').whereIn('domain_id', domainIds)
+        : [];
+      const ownedCronJobIds = new Set([...ownCreatedCronJobs, ...domainScopedCronJobs].map(j => j.id));
 
       // Delete user
       await database('users').where('id', id).del();
 
+      for (const jobId of ownedCronJobIds) {
+        cronJobRunner.unregister(jobId);
+      }
       for (const domain of ownedDomains) {
         await dnsService.removeZone(domain.domain).catch(err =>
           logger.warn(`DNS zone cleanup failed for domain ${domain.domain} (owner user #${id} deleted):`, err.message));
