@@ -384,11 +384,21 @@ router.delete('/:name',
 // the upstream validation can't turn into command injection here.
 
 // Get Windows services
+//
+// Get-Service's Status/StartType properties are .NET enums
+// (ServiceControllerStatus/ServiceStartMode) — Windows PowerShell 5.1's
+// ConvertTo-Json serializes an enum as its underlying integer value, not
+// its name, unless explicitly cast to string first. Piping straight into
+// ConvertTo-Json (as this used to) produced `"Status": 4` instead of
+// `"Status": "Running"`, and `service.Status.toLowerCase()` then threw
+// (numbers have no .toLowerCase), silently collapsing the whole services
+// list to `[]` since the error was caught below. Cast both fields to
+// [string] in the pipeline so the JSON always carries the name.
 async function getWindowsServices() {
   try {
     const { stdout } = await execFileAsync('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command',
-      'Get-Service | ConvertTo-Json'
+      "Get-Service | Select-Object Name, DisplayName, @{N='Status';E={[string]$_.Status}}, @{N='StartType';E={[string]$_.StartType}}, CanStop, CanPauseAndContinue | ConvertTo-Json"
     ]);
     const services = JSON.parse(stdout);
 
@@ -396,7 +406,7 @@ async function getWindowsServices() {
       name: service.Name,
       displayName: service.DisplayName,
       description: service.DisplayName,
-      status: service.Status.toLowerCase(),
+      status: String(service.Status || '').toLowerCase(),
       enabled: service.StartType !== 'Disabled',
       startType: service.StartType,
       canStop: service.CanStop,
@@ -437,7 +447,7 @@ async function getWindowsServiceDetails(name) {
   try {
     const { stdout } = await execFileAsync('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command',
-      'Get-Service -Name $env:SVC_NAME | ConvertTo-Json'
+      "Get-Service -Name $env:SVC_NAME | Select-Object Name, DisplayName, @{N='Status';E={[string]$_.Status}}, @{N='StartType';E={[string]$_.StartType}}, CanStop, CanPauseAndContinue | ConvertTo-Json"
     ], { env: { ...process.env, SVC_NAME: name } });
     const service = JSON.parse(stdout);
 
@@ -445,7 +455,7 @@ async function getWindowsServiceDetails(name) {
       name: service.Name,
       displayName: service.DisplayName,
       description: service.DisplayName,
-      status: service.Status.toLowerCase(),
+      status: String(service.Status || '').toLowerCase(),
       enabled: service.StartType !== 'Disabled',
       startType: service.StartType,
       canStop: service.CanStop,
@@ -520,13 +530,30 @@ async function controlLinuxService(name, action) {
 }
 
 // Get Windows service logs
+//
+// -Source $name assumed a service's own short name is a registered Event
+// Log source — it almost never is; ordinary service start/stop/error
+// events are actually logged under the shared "Service Control Manager"
+// source, with the service's *display* name embedded in the message text.
+// The old query reliably threw "No matches found" for real services,
+// which the catch block below swallowed into a silent empty result.
+// Instead: look up the display name, then filter SCM's recent messages
+// for it.
 async function getWindowsServiceLogs(name, lines) {
   try {
+    const command = [
+      '$svc = Get-Service -Name $env:SVC_NAME -ErrorAction SilentlyContinue;',
+      '$filter = if ($svc) { $svc.DisplayName } else { $env:SVC_NAME };',
+      "Get-EventLog -LogName System -Source 'Service Control Manager' -Newest 1000 -ErrorAction SilentlyContinue |",
+      'Where-Object { $_.Message -like "*$filter*" } |',
+      "Select-Object -First ([int]$env:SVC_LINES) TimeGenerated, @{N='EntryType';E={[string]$_.EntryType}}, Message |",
+      'ConvertTo-Json'
+    ].join(' ');
+
     const { stdout } = await execFileAsync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command',
-      'Get-EventLog -LogName System -Source $env:SVC_NAME -Newest ([int]$env:SVC_LINES) | ConvertTo-Json'
+      '-NoProfile', '-NonInteractive', '-Command', command
     ], { env: { ...process.env, SVC_NAME: name, SVC_LINES: String(lines) } });
-    const events = JSON.parse(stdout);
+    const events = stdout.trim() ? JSON.parse(stdout) : [];
 
     return (Array.isArray(events) ? events : [events]).map(event => ({
       timestamp: event.TimeGenerated,

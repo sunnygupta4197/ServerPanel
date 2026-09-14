@@ -23,15 +23,21 @@ router.get('/', requirePermission('ssl:read'), async (req, res) => {
         .select('ssl_certificates.*');
     }
 
-    // Annotate with days until expiry
+    // Annotate with days until expiry, and strip the private key — GET
+    // /:id already does this (`const { private_key, ...safe } = cert`) but
+    // this list endpoint didn't, so every cert's private key was returned
+    // in plaintext to anyone with ssl:read (granted to "user" by default).
     const now = Date.now();
-    const enriched = certs.map(cert => ({
-      ...cert,
-      days_until_expiry: cert.expires_at
-        ? Math.ceil((new Date(cert.expires_at) - now) / 86400000)
-        : null,
-      is_expired: cert.expires_at ? new Date(cert.expires_at) < new Date() : false
-    }));
+    const enriched = certs.map(cert => {
+      const { private_key, ...safe } = cert;
+      return {
+        ...safe,
+        days_until_expiry: cert.expires_at
+          ? Math.ceil((new Date(cert.expires_at) - now) / 86400000)
+          : null,
+        is_expired: cert.expires_at ? new Date(cert.expires_at) < new Date() : false
+      };
+    });
 
     res.json({ success: true, data: enriched });
   } catch (err) {

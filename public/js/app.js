@@ -390,12 +390,6 @@ class ServerPanelApp {
     this.initializeStatsCardHandlers();
   }
 
-  // Toggle theme
-  toggleTheme() {
-    this.applyTheme(this.theme === 'dark' ? 'light' : 'dark');
-  }
-
-
   // Navigate to page
   navigateToPage(page) {
     // Unsubscribe the room we're leaving
@@ -1432,7 +1426,8 @@ class ServerPanelApp {
   // Update processes display in modal
   updateProcessesDisplay(processes) {
     const processesContent = document.getElementById('processes-content');
-    if (!processesContent || !processes || !processes.length) {
+    if (!processesContent) return; // modal was closed before this fetch resolved
+    if (!processes || !processes.length) {
       processesContent.innerHTML = `
         <div style="text-align: center; padding: 2rem; color: var(--text-secondary);">
           <i class="fas fa-info-circle" style="color: var(--info); margin-right: 0.5rem;"></i>
@@ -1464,8 +1459,8 @@ class ServerPanelApp {
               <tr>
                 <td style="padding: 0.75rem; font-family: monospace; font-size: 0.875rem;">${process.pid}</td>
                 <td style="padding: 0.75rem; font-size: 0.875rem;">
-                  <div style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${process.name}">
-                    ${process.name || 'Unknown'}
+                  <div style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${this.escapeHtml(process.name || '')}">
+                    ${this.escapeHtml(process.name || 'Unknown')}
                   </div>
                 </td>
                 <td style="padding: 0.75rem; font-weight: 600; font-size: 0.875rem;">
@@ -1476,10 +1471,10 @@ class ServerPanelApp {
                 <td style="padding: 0.75rem; font-size: 0.875rem;">
                   ${this.formatBytes(process.memory || 0)}
                 </td>
-                <td style="padding: 0.75rem; font-size: 0.875rem;">${process.user || 'N/A'}</td>
+                <td style="padding: 0.75rem; font-size: 0.875rem;">${this.escapeHtml(process.user || 'N/A')}</td>
                 <td style="padding: 0.75rem; font-size: 0.875rem;">
                   <span class="status ${process.state === 'running' ? 'online' : process.state === 'sleeping' ? 'warning' : 'offline'}" style="padding: 0.25rem 0.5rem; font-size: 0.6rem;">
-                    ${process.state || 'unknown'}
+                    ${this.escapeHtml(process.state || 'unknown')}
                   </span>
                 </td>
               </tr>
@@ -1707,7 +1702,8 @@ class ServerPanelApp {
   // Update network display in modal
   updateNetworkDisplay(networkInterfaces) {
     const content = document.getElementById('network-content');
-    if (!content || !networkInterfaces || !networkInterfaces.length) {
+    if (!content) return; // modal was closed before this fetch resolved
+    if (!networkInterfaces || !networkInterfaces.length) {
       content.innerHTML = `
         <div style="text-align: center; padding: 2rem; color: var(--text-secondary);">
           <i class="fas fa-info-circle" style="color: var(--info); margin-right: 0.5rem;"></i>
@@ -1717,11 +1713,15 @@ class ServerPanelApp {
       return;
     }
 
-    // Filter out loopback and internal interfaces, prioritize active ones
-    const activeInterfaces = networkInterfaces.filter(iface => 
-      iface.name && 
-      !iface.name.startsWith('lo') && 
-      iface.ip4 && 
+    // The backend's interface objects (systemService.js's getSystemStats
+    // and getNetworkInterfaces) use `iface`/`ifaceName`, never `name` — this
+    // used to filter on `iface.name`, which is always undefined, so
+    // activeInterfaces was always empty and the modal showed "No network
+    // interfaces found" even when real interfaces existed.
+    const activeInterfaces = networkInterfaces.filter(iface =>
+      iface.ifaceName &&
+      !iface.ifaceName.startsWith('lo') &&
+      iface.ip4 &&
       iface.ip4 !== '127.0.0.1'
     );
 
@@ -1732,41 +1732,41 @@ class ServerPanelApp {
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
               <h4 style="color: var(--text-primary); margin: 0; display: flex; align-items: center; gap: 0.5rem;">
                 <i class="fas fa-ethernet" style="color: var(--primary);"></i>
-                ${iface.name}
+                ${this.escapeHtml(iface.ifaceName || iface.iface || '')}
               </h4>
               <span class="status ${iface.operstate === 'up' ? 'online' : 'offline'}" style="padding: 0.25rem 0.75rem; font-size: 0.75rem;">
-                ${iface.operstate || 'unknown'}
+                ${this.escapeHtml(iface.operstate || 'unknown')}
               </span>
             </div>
-            
+
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
               <div>
                 <div style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 0.25rem;">IPv4 Address</div>
-                <div style="color: var(--text-primary); font-weight: 600; font-family: monospace;">${iface.ip4 || 'N/A'}</div>
+                <div style="color: var(--text-primary); font-weight: 600; font-family: monospace;">${this.escapeHtml(iface.ip4 || 'N/A')}</div>
               </div>
-              
+
               <div>
                 <div style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 0.25rem;">MAC Address</div>
-                <div style="color: var(--text-primary); font-weight: 600; font-family: monospace;">${iface.mac || 'N/A'}</div>
+                <div style="color: var(--text-primary); font-weight: 600; font-family: monospace;">${this.escapeHtml(iface.mac || 'N/A')}</div>
               </div>
-              
+
               <div>
                 <div style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 0.25rem;">Speed</div>
                 <div style="color: var(--primary); font-weight: 600;">
-                  ${iface.speed ? `${iface.speed} Mbps` : 'Unknown'}
+                  ${iface.speed ? `${this.escapeHtml(String(iface.speed))} Mbps` : 'Unknown'}
                 </div>
               </div>
-              
+
               <div>
                 <div style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 0.25rem;">Type</div>
-                <div style="color: var(--text-primary); font-weight: 600;">${iface.type || 'Ethernet'}</div>
+                <div style="color: var(--text-primary); font-weight: 600;">${this.escapeHtml(iface.type || 'Ethernet')}</div>
               </div>
             </div>
 
             ${iface.ip6 ? `
               <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);">
                 <div style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 0.25rem;">IPv6 Address</div>
-                <div style="color: var(--text-primary); font-weight: 600; font-family: monospace; font-size: 0.875rem;">${iface.ip6}</div>
+                <div style="color: var(--text-primary); font-weight: 600; font-family: monospace; font-size: 0.875rem;">${this.escapeHtml(iface.ip6)}</div>
               </div>
             ` : ''}
           </div>
@@ -1842,7 +1842,8 @@ class ServerPanelApp {
   // Update disk display in modal
   updateDiskDisplay(storageDevices) {
     const content = document.getElementById('disk-content');
-    if (!content || !storageDevices || !storageDevices.length) {
+    if (!content) return; // modal was closed before this fetch resolved
+    if (!storageDevices || !storageDevices.length) {
       content.innerHTML = `
         <div style="text-align: center; padding: 2rem; color: var(--text-secondary);">
           <i class="fas fa-info-circle" style="color: var(--info); margin-right: 0.5rem;"></i>
@@ -1863,7 +1864,7 @@ class ServerPanelApp {
               <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
                 <h4 style="color: var(--text-primary); margin: 0; display: flex; align-items: center; gap: 0.5rem;">
                   <i class="fas fa-hdd" style="color: var(--success);"></i>
-                  ${disk.fs || disk.mount || 'Unknown Drive'}
+                  ${this.escapeHtml(disk.fs || disk.mount || 'Unknown Drive')}
                 </h4>
                 <span style="color: ${this.getDiskUsageColor(usagePercent)}; font-weight: 600; font-size: 1.1rem;">
                   ${usagePercent}% Used
@@ -1884,12 +1885,12 @@ class ServerPanelApp {
               <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
                 <div>
                   <div style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 0.25rem;">Mount Point</div>
-                  <div style="color: var(--text-primary); font-weight: 600; font-family: monospace;">${disk.mount || 'N/A'}</div>
+                  <div style="color: var(--text-primary); font-weight: 600; font-family: monospace;">${this.escapeHtml(disk.mount || 'N/A')}</div>
                 </div>
-                
+
                 <div>
                   <div style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 0.25rem;">File System</div>
-                  <div style="color: var(--text-primary); font-weight: 600;">${disk.type || 'Unknown'}</div>
+                  <div style="color: var(--text-primary); font-weight: 600;">${this.escapeHtml(disk.type || 'Unknown')}</div>
                 </div>
                 
                 <div>
@@ -2164,7 +2165,13 @@ class ServerPanelApp {
     return `${days}d ${hours}h ${minutes}m`;
   }
 
-  // Format bytes to human readable
+  // Format bytes to human readable. This class used to define formatBytes()
+  // twice (a later, worse duplicate around the file-manager code silently
+  // shadowed this one, per JS class semantics — the last definition wins).
+  // The duplicate was missing TB support entirely, so any value >=1TiB
+  // rendered as "2undefined" instead of "2.0 TB"; it also returned no space
+  // between the number and unit and a different zero-byte fallback. Removed;
+  // this is now the sole definition.
   formatBytes(bytes, decimals = 1) {
     if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
@@ -3398,14 +3405,6 @@ class ServerPanelApp {
   // Utility methods
   capitalizeFirst(str) {
     return str.charAt(0).toUpperCase() + str.slice(1);
-  }
-
-  formatBytes(bytes) {
-    if (!bytes || bytes === 0) return '0MB';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + sizes[i];
   }
 
   // File management methods
