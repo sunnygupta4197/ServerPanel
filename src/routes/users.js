@@ -8,6 +8,10 @@ const logger = require('../config/logger');
 const config = require('../config/config');
 const database = require('../config/database');
 const { getDefaultPermissions, getAllPermissions } = require('../config/permissions');
+const dnsService = require('../services/dnsService');
+const mailService = require('../services/mailService');
+const ftpService = require('../services/ftpService');
+const customerDatabaseService = require('../services/customerDatabaseService');
 
 // Rejects any permission string that isn't one the app actually grants
 // anywhere (src/config/permissions.js) — previously permissions() was
@@ -399,8 +403,50 @@ router.delete('/:id',
         });
       }
 
+      // domains, email_accounts, ftp_accounts, and customer_databases all
+      // CASCADE-delete at the DB level when their owning user disappears
+      // (domains and email_accounts/customer_databases both have a
+      // user_id FK set to CASCADE) — that's a plain FK cascade inside the
+      // database engine, which runs no application code. Left alone, that
+      // silently orphans real infrastructure this app can no longer even
+      // see: the user's BIND zones and Postfix/Dovecot mailboxes would
+      // keep serving indefinitely (nothing told them the accounts are
+      // gone), their vsftpd credentials would keep working, and worst —
+      // any real MySQL/Postgres databases created via
+      // customer-databases.js would never be dropped, becoming untracked
+      // resources with no customer_databases row left to even know they
+      // need cleaning up.
+      //
+      // Fetch what needs explicit per-resource teardown (domains, for
+      // their zone files; customer databases, for the real DROP) BEFORE
+      // deleting — the cascade removes the rows that would otherwise tell
+      // us what to clean up.
+      const ownedDomains = await database('domains').where('user_id', id);
+      const ownedDatabases = await database('customer_databases').where('user_id', id);
+
       // Delete user
       await database('users').where('id', id).del();
+
+      for (const domain of ownedDomains) {
+        await dnsService.removeZone(domain.domain).catch(err =>
+          logger.warn(`DNS zone cleanup failed for domain ${domain.domain} (owner user #${id} deleted):`, err.message));
+      }
+      for (const db of ownedDatabases) {
+        await customerDatabaseService.dropDatabase(db).catch(err =>
+          logger.error(`Failed to drop real database "${db.db_name}" (owner user #${id} deleted) — it may still exist on the server with no app-side record:`, err.message));
+      }
+
+      // ftp_accounts/email_accounts belonging to this user (directly, or
+      // via one of their now-deleted domains) are already gone from the
+      // DB by this point — a plain resync from whatever's left correctly
+      // excludes them, same "rebuild from current state" pattern every
+      // other create/update/delete already uses.
+      const remainingFtpAccounts = await database('ftp_accounts').select('*');
+      await ftpService.syncVsftpdConfig(remainingFtpAccounts).catch(err =>
+        logger.warn(`FTP resync failed after deleting user #${id}:`, err.message));
+      const remainingEmailAccounts = await database('email_accounts').select('*');
+      await mailService.syncMailConfig(remainingEmailAccounts).catch(err =>
+        logger.warn(`Mail config resync failed after deleting user #${id}:`, err.message));
 
       // Log user deletion
       await database('activity_logs').insert({

@@ -20,6 +20,10 @@ async function checkFtpQuotas() {
 
   for (const account of accounts) {
     const usedMb = await getDirectorySizeMb(account.home_dir);
+    // quota_mb: 0 means unlimited (the standard hosting-panel convention —
+    // cPanel's own quota fields use the same "0 = unlimited" meaning)
+    // rather than "no allowance at all", which is why this checks > 0
+    // instead of treating 0 as an always-exceeded quota.
     const overQuota = account.quota_mb > 0 && usedMb > account.quota_mb;
 
     if (usedMb !== account.used_mb || overQuota !== !!account.over_quota) {
@@ -60,7 +64,7 @@ async function checkEmailQuotas() {
   for (const account of accounts) {
     if (!account.maildir) continue;
     const usedMb = await getDirectorySizeMb(account.maildir);
-    const overQuota = account.quota_mb > 0 && usedMb > account.quota_mb;
+    const overQuota = account.quota_mb > 0 && usedMb > account.quota_mb; // 0 = unlimited, see checkFtpQuotas
 
     if (usedMb !== account.used_mb || overQuota !== !!account.over_quota) {
       anyChanged = true;

@@ -6,6 +6,7 @@ const database = require('../config/database');
 const logger = require('../config/logger');
 const phpService = require('../services/phpService');
 const dnsService = require('../services/dnsService');
+const mailService = require('../services/mailService');
 
 // Rewrites domain's zone file from its current dns_records and applies it
 // (best-effort — see dnsService.syncBindZone). Called after any DNS
@@ -210,7 +211,24 @@ router.delete('/:id', requirePermission('domains:write'),
       if (req.user.role !== 'admin' && domain.user_id !== req.user.id)
         return res.status(403).json({ success: false, message: 'Access denied' });
 
+      // dns_records and email_accounts both CASCADE-delete at the DB level
+      // when their domain_id's parent row disappears (see
+      // migrations/fix_hosting_schemas.js) — that's a plain FK cascade
+      // inside the database engine, so it runs no application code at
+      // all. Left alone, that means a deleted domain's real BIND zone and
+      // Postfix/Dovecot mailboxes would keep working on the real servers
+      // indefinitely: nothing ever told them the accounts/records are
+      // gone. Tear both down explicitly, after the delete, so what's
+      // actually being served matches what the app now shows.
       await database('domains').where('id', req.params.id).delete();
+
+      await dnsService.removeZone(domain.domain).catch(err =>
+        logger.warn(`DNS zone cleanup failed for deleted domain ${domain.domain}:`, err.message));
+
+      const remainingEmailAccounts = await database('email_accounts').select('*');
+      await mailService.syncMailConfig(remainingEmailAccounts).catch(err =>
+        logger.warn(`Mail config resync failed after deleting domain ${domain.domain}:`, err.message));
+
       logger.info(`Domain ${domain.domain} deleted by ${req.user.username}`);
       res.json({ success: true, message: 'Domain deleted' });
     } catch (err) {

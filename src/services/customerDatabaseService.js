@@ -77,27 +77,59 @@ async function provisionSqlite(dbName, ownerId) {
   return { filePath, host: null, port: null, dbUser: null };
 }
 
+// MySQL DDL auto-commits statement-by-statement (no transaction can wrap
+// it); Postgres CAN run CREATE DATABASE/USER/GRANT in one transaction,
+// but CREATE DATABASE specifically can't run inside a multi-statement
+// transaction block on Postgres either — so neither engine gives this a
+// real all-or-nothing primitive to lean on. If CREATE DATABASE succeeds
+// but a later statement (CREATE USER, GRANT, FLUSH PRIVILEGES) fails —
+// wrong password character, a leftover user from a previous failed
+// attempt, a privilege gap that only bites on the second statement — the
+// database would otherwise be left behind on the real server with no
+// customer_databases row pointing at it and no password ever issued to
+// anyone. best-effort cleanup here, then rethrow the original error, so
+// a caller sees the real failure reason and the server is left as close
+// to its pre-attempt state as this app can manage without a real
+// transaction to rely on.
 async function provisionServerDatabase(dbName, dbUser, password) {
   const client = config.DATABASE.client;
   const isMysql = client === 'mysql2' || client === 'mysql';
 
-  if (isMysql) {
-    // MySQL's CREATE USER/GRANT ... TO syntax quotes the 'user'@'host'
-    // pair as string literals, NOT backtick-quoted identifiers — using
-    // knex's `??` (identifier) binding here instead of `?` (value)
-    // would emit invalid SQL (backtick-quoted `%`), so dbUser/host are
-    // bound as regular values while dbName (a genuine identifier
-    // position) stays `??`.
-    await database.raw('CREATE DATABASE ??', [dbName]);
-    await database.raw('CREATE USER ?@? IDENTIFIED BY ?', [dbUser, '%', password]);
-    await database.raw('GRANT ALL PRIVILEGES ON ??.* TO ?@?', [dbName, dbUser, '%']);
-    await database.raw('FLUSH PRIVILEGES');
-  } else if (client === 'pg') {
-    await database.raw('CREATE DATABASE ??', [dbName]);
-    await database.raw('CREATE USER ?? WITH PASSWORD ?', [dbUser, password]);
-    await database.raw('GRANT ALL PRIVILEGES ON DATABASE ?? TO ??', [dbName, dbUser]);
-  } else {
+  if (!isMysql && client !== 'pg') {
     throw Object.assign(new Error(`Unsupported database client: ${client}`), { code: 'UNSUPPORTED_CLIENT' });
+  }
+
+  let databaseCreated = false;
+  try {
+    if (isMysql) {
+      // MySQL's CREATE USER/GRANT ... TO syntax quotes the 'user'@'host'
+      // pair as string literals, NOT backtick-quoted identifiers — using
+      // knex's `??` (identifier) binding here instead of `?` (value)
+      // would emit invalid SQL (backtick-quoted `%`), so dbUser/host are
+      // bound as regular values while dbName (a genuine identifier
+      // position) stays `??`.
+      await database.raw('CREATE DATABASE ??', [dbName]);
+      databaseCreated = true;
+      await database.raw('CREATE USER ?@? IDENTIFIED BY ?', [dbUser, '%', password]);
+      await database.raw('GRANT ALL PRIVILEGES ON ??.* TO ?@?', [dbName, dbUser, '%']);
+      await database.raw('FLUSH PRIVILEGES');
+    } else {
+      await database.raw('CREATE DATABASE ??', [dbName]);
+      databaseCreated = true;
+      await database.raw('CREATE USER ?? WITH PASSWORD ?', [dbUser, password]);
+      await database.raw('GRANT ALL PRIVILEGES ON DATABASE ?? TO ??', [dbName, dbUser]);
+    }
+  } catch (error) {
+    if (databaseCreated) {
+      await database.raw('DROP DATABASE IF EXISTS ??', [dbName]).catch(cleanupError =>
+        logger.error(`Customer DB: provisioning failed AND cleanup of orphaned database "${dbName}" also failed — it may still exist on the server with no app-side record:`, cleanupError.message));
+      if (isMysql) {
+        await database.raw('DROP USER IF EXISTS ?@?', [dbUser, '%']).catch(() => {});
+      } else {
+        await database.raw('DROP USER IF EXISTS ??', [dbUser]).catch(() => {});
+      }
+    }
+    throw error;
   }
 
   return {

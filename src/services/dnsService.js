@@ -54,9 +54,18 @@ async function detectBindSupport() {
 // (bare "@" for the apex, "www" for a subdomain), so this converts one to
 // the other rather than requiring the caller/DB to store both.
 function relativizeName(name, domain) {
-  if (name === domain) return '@';
-  if (name.endsWith(`.${domain}`)) return name.slice(0, -(domain.length + 1));
-  return `${name}.`; // not actually under this zone — write it fully-qualified rather than guess wrong
+  // Normalize a trailing dot before comparing — dns_records.name is never
+  // supposed to carry one (see domains.js's default-records insert, which
+  // never writes one), but nothing validates that on the way in, and an
+  // un-normalized trailing dot broke BOTH branches below: it made a real
+  // subdomain's name.endsWith(`.${domain}`) check fail (the record fell
+  // through to "external" instead), and then stacked a second dot onto an
+  // already-fully-qualified name ("foo.example.com.." — invalid zone
+  // syntax) in that fallback branch.
+  const normalized = name.endsWith('.') ? name.slice(0, -1) : name;
+  if (normalized === domain) return '@';
+  if (normalized.endsWith(`.${domain}`)) return normalized.slice(0, -(domain.length + 1));
+  return `${normalized}.`; // not actually under this zone — write it fully-qualified rather than guess wrong
 }
 
 // BIND zone serials must be a 32-bit unsigned int that increases on every
@@ -112,6 +121,28 @@ function generateZoneFile(domain, records) {
 // Returns { activated, reason } like ftpService/mailService's sync
 // functions — the app's own dns_records rows are already saved by the
 // caller regardless of what this returns.
+// Rebuilds the include conf from every .zone file actually on disk (not
+// just one domain) and best-effort tells BIND to pick up the result —
+// shared by syncBindZone (after writing/updating a zone) and removeZone
+// (after deleting one), since both need the same "conf must reflect
+// exactly what's on disk right now" rebuild.
+async function rebuildZonesInclude(context) {
+  const zoneFiles = (await fs.readdir(ZONES_DIR)).filter(f => f.endsWith('.zone'));
+  const confBlocks = zoneFiles.map(f => {
+    const zoneDomain = f.slice(0, -'.zone'.length);
+    return `zone "${zoneDomain}" {\n\ttype master;\n\tfile "${path.join(ZONES_DIR, f)}";\n};`;
+  });
+  await fs.writeFile(ZONES_INCLUDE_FILE, confBlocks.join('\n\n') + '\n');
+
+  // rndc reconfig picks up added AND removed zone{} blocks (a zone whose
+  // block just disappeared from the included conf stops being served);
+  // both calls are best-effort — a host where the operator hasn't yet
+  // added the one-time named.conf include (see getSetupInstructions)
+  // fails rndc reconfig harmlessly here.
+  await execFileAsync('rndc', ['reconfig']).catch(err =>
+    logger.warn(`DNS: rndc reconfig failed for ${context} (zone files were still written) :`, err.message));
+}
+
 async function syncBindZone(domain, records) {
   const support = await detectBindSupport();
   if (!support.available) {
@@ -129,30 +160,39 @@ async function syncBindZone(domain, records) {
       return { activated: false, reason: `Generated zone failed named-checkzone: ${checkError.message}` };
     }
 
-    // Rebuild the include conf from every zone file actually on disk, not
-    // just this one — mirrors ftpService's "rewrite everything from
-    // current state" pattern rather than trying to patch one block in
-    // place.
-    const zoneFiles = (await fs.readdir(ZONES_DIR)).filter(f => f.endsWith('.zone'));
-    const confBlocks = zoneFiles.map(f => {
-      const zoneDomain = f.slice(0, -'.zone'.length);
-      return `zone "${zoneDomain}" {\n\ttype master;\n\tfile "${path.join(ZONES_DIR, f)}";\n};`;
-    });
-    await fs.writeFile(ZONES_INCLUDE_FILE, confBlocks.join('\n\n') + '\n');
-
-    // rndc reconfig picks up newly-added zone{} blocks; rndc reload
-    // <domain> forces this specific zone's file to be re-read even if it
-    // was already declared. Both are best-effort — a host where the
-    // operator hasn't yet added the one-time named.conf include (see
-    // getSetupInstructions) will fail rndc reconfig harmlessly here.
-    await execFileAsync('rndc', ['reconfig']).catch(err =>
-      logger.warn(`DNS: rndc reconfig failed for ${domain} (zone file was still written) :`, err.message));
+    await rebuildZonesInclude(domain);
+    // rndc reload forces this specific zone's file to be re-read even if
+    // it was already declared before this sync (reconfig alone doesn't
+    // re-read an existing zone's file on its own).
     await execFileAsync('rndc', ['reload', domain]).catch(() => { /* expected to fail until the operator's one-time named.conf include is in place */ });
 
     return { activated: true };
   } catch (error) {
     logger.warn(`DNS: zone sync failed for ${domain}, records still saved in the app:`, error.message);
     return { activated: false, reason: `zone sync failed: ${error.message}` };
+  }
+}
+
+// Tears down a domain's zone entirely — the counterpart syncBindZone
+// never had: deleting a domain cascades its dns_records away at the DB
+// level (see the domains table's FK), which runs no application code at
+// all, so nothing previously told BIND to stop serving that zone. Called
+// by domains.js's DELETE /:id, after the domain row (and its cascaded
+// dns_records) are gone, so the zone file removed here matches reality.
+async function removeZone(domain) {
+  const support = await detectBindSupport();
+  if (!support.available) {
+    return { activated: false, reason: support.reason };
+  }
+
+  try {
+    const zoneFilePath = path.join(ZONES_DIR, `${domain}.zone`);
+    await fs.unlink(zoneFilePath).catch(() => { /* already gone, or never existed — fine */ });
+    await rebuildZonesInclude(domain);
+    return { activated: true };
+  } catch (error) {
+    logger.warn(`DNS: zone removal failed for ${domain}:`, error.message);
+    return { activated: false, reason: `zone removal failed: ${error.message}` };
   }
 }
 
@@ -173,6 +213,7 @@ module.exports = {
   detectBindSupport,
   generateZoneFile,
   syncBindZone,
+  removeZone,
   getSetupInstructions,
   relativizeName
 };
