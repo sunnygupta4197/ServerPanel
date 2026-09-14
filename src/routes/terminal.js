@@ -4,10 +4,11 @@ const { spawn } = require('child_process');
 const { body, validationResult } = require('express-validator');
 const path = require('path');
 const fsSync = require('fs');
-const { requireRole } = require('../middleware/authMiddleware');
+const { requireRole, requirePermission } = require('../middleware/authMiddleware');
 const logger = require('../config/logger');
 const config = require('../config/config');
 const database = require('../config/database');
+const safeCommandService = require('../services/safeCommandService');
 
 const MAX_OUTPUT_CHARS = 200 * 1024; // cap captured output per command
 const COMMAND_TIMEOUT_MS = 30000;
@@ -112,6 +113,66 @@ router.get('/history', requireRole('admin'), async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to retrieve terminal history' });
   }
 });
+
+// Restricted, non-admin path (terminal:safe permission — see
+// src/config/permissions.js): a fixed, enum-keyed list of read-only
+// diagnostic actions, never free text. This is deliberately a completely
+// separate code path from POST /execute above rather than a "reduced
+// permission" flag on it — there's no cwd/allowlist/sandbox that makes a
+// free-text shell safe for a non-admin (a cwd restriction doesn't stop
+// `cat /etc/passwd` or `cd ..`), so the only real boundary is not
+// accepting free text in the first place.
+router.get('/safe-actions', requirePermission('terminal:safe'), (req, res) => {
+  res.json({ success: true, data: safeCommandService.listActions() });
+});
+
+router.post('/safe-command',
+  requirePermission('terminal:safe'),
+  [
+    body('action').isString().isLength({ min: 1, max: 100 }),
+    body('domainId').optional().isInt()
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      }
+
+      const { action } = req.body;
+      let documentRoot;
+
+      if (safeCommandService.requiresDomain(action)) {
+        if (!req.body.domainId) {
+          return res.status(400).json({ success: false, message: `Action "${action}" requires a domainId` });
+        }
+        const domain = await database('domains').where('id', req.body.domainId).first();
+        if (!domain || (req.user.role !== 'admin' && domain.user_id !== req.user.id)) {
+          return res.status(404).json({ success: false, message: 'Domain not found' });
+        }
+        documentRoot = domain.document_root;
+      }
+
+      const output = await safeCommandService.runAction(action, documentRoot);
+
+      logger.audit('terminal_safe_command', req.user, 'terminal', { action, domainId: req.body.domainId });
+      await database('activity_logs').insert({
+        user_id: req.user.id,
+        action: 'terminal_safe_command',
+        resource_type: 'terminal',
+        details: JSON.stringify({ action, domainId: req.body.domainId }),
+        ip_address: req.ip,
+        severity: 'info',
+        performed_at: new Date()
+      }).catch(err => logger.error('Failed to write terminal_safe_command audit log row:', err));
+
+      res.json({ success: true, data: { output } });
+    } catch (error) {
+      logger.error('Error running safe terminal action:', error);
+      res.status(400).json({ success: false, message: error.message || 'Failed to run action' });
+    }
+  }
+);
 
 function isDirectory(targetPath) {
   try {

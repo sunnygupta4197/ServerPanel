@@ -331,14 +331,14 @@ class ServerPanelApp {
       this.initializeSocket();
       this.initializeCharts();
 
-      // Terminal/Cron are admin-only on the backend (requireRole('admin'),
-      // not a permission string — see terminal.js/cron.js) — hide the nav
-      // group entirely for non-admins rather than showing links that will
-      // just 403. The sidebar itself isn't otherwise role-aware, but these
-      // two are sensitive enough (direct shell access) to be worth the
-      // one-off treatment.
-      const adminNavGroup = document.getElementById('nav-group-admin');
-      if (adminNavGroup) adminNavGroup.style.display = this.currentUser?.role === 'admin' ? '' : 'none';
+      // Terminal is visible to every role now (admin: full free-text shell;
+      // user/viewer: fixed safe-action list via terminal:safe — see
+      // src/services/safeCommandService.js). Cron stays hidden for viewer:
+      // it has no cron:safe grant (scheduling something to run later isn't
+      // a read-only action — see src/config/permissions.js), and admin/user
+      // both see it (admin: free-text jobs; user: safe-action jobs).
+      const cronNavItem = document.getElementById('nav-cron-jobs');
+      if (cronNavItem) cronNavItem.style.display = this.currentUser?.role === 'viewer' ? 'none' : '';
 
       const lastPage = localStorage.getItem('sp_page') || 'dashboard';
       this.navigateToPage(lastPage);
@@ -5692,6 +5692,9 @@ class ServerPanelApp {
   // =====================================================
 
   getTerminalPageContent() {
+    if (this.currentUser?.role !== 'admin') {
+      return this._getSafeTerminalPageContent();
+    }
     return `
       <div style="margin-top:1.5rem;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
@@ -5726,7 +5729,119 @@ class ServerPanelApp {
     `;
   }
 
+  // Non-admin path: a fixed dropdown of safe, read-only diagnostic actions
+  // (see src/services/safeCommandService.js) — deliberately NOT a text
+  // input. There is no free-text field anywhere in this markup for a
+  // non-admin to reach, even by hand-editing the DOM: the request body is
+  // built from the selected <option>'s value, and the backend
+  // (terminal:safe) independently re-validates it against the same fixed
+  // action table regardless of what the client sends.
+  _getSafeTerminalPageContent() {
+    return `
+      <div style="margin-top:1.5rem;">
+        <div>
+          <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-terminal" style="color:var(--primary);margin-right:0.5rem;"></i>Terminal</h2>
+          <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">A fixed set of read-only diagnostic actions. Free-text commands are admin-only.</p>
+        </div>
+        <div class="card" style="margin-top:0.75rem;">
+          <div style="display:flex;gap:0.75rem;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-group" style="flex:1;min-width:220px;">
+              <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Action</label>
+              <select id="safe-terminal-action" class="form-control" style="width:100%;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" onchange="app._onSafeActionChange('safe-terminal-action', 'safe-terminal-domain-group')">
+                <option value="">Loading…</option>
+              </select>
+            </div>
+            <div class="form-group" id="safe-terminal-domain-group" style="flex:1;min-width:200px;display:none;">
+              <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Domain</label>
+              <select id="safe-terminal-domain" class="form-control" style="width:100%;padding:0.6rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);"></select>
+            </div>
+            <button class="btn btn-primary" onclick="app.runSafeTerminalAction()"><i class="fas fa-play"></i> Run</button>
+          </div>
+        </div>
+        <div class="card" style="padding:0;overflow:hidden;margin-top:0.75rem;">
+          <div id="safe-terminal-output" style="background:#0d1117;color:#c9d1d9;font-family:'Consolas','Courier New',monospace;font-size:0.8125rem;padding:1rem;height:340px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;">Select an action above and click Run.</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Shared by the safe terminal action select and the safe cron action
+  // select: toggles the paired domain <select> only for actions whose
+  // `requiresDomain` flag (from GET .../safe-actions) is true.
+  _onSafeActionChange(selectId, domainGroupId) {
+    const select = document.getElementById(selectId);
+    const group = document.getElementById(domainGroupId);
+    if (!select || !group) return;
+    const opt = select.options[select.selectedIndex];
+    group.style.display = opt && opt.dataset.requiresDomain === 'true' ? '' : 'none';
+  }
+
+  async _populateSafeActionSelect(selectId, endpoint) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    try {
+      const res = await fetch(endpoint);
+      const data = await res.json();
+      if (data.success && data.data.length) {
+        select.innerHTML = data.data.map(a =>
+          `<option value="${this.escapeHtml(a.key)}" data-requires-domain="${!!a.requiresDomain}">${this.escapeHtml(a.label)}</option>`
+        ).join('');
+      } else {
+        select.innerHTML = `<option value="">No actions available</option>`;
+      }
+    } catch (error) {
+      console.error('Error loading safe actions:', error);
+      select.innerHTML = `<option value="">Failed to load actions</option>`;
+    }
+  }
+
+  async _populateDomainSelect(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    try {
+      const res = await fetch('/api/domains');
+      const data = await res.json();
+      select.innerHTML = (data.success && data.data.length)
+        ? data.data.map(d => `<option value="${d.id}">${this.escapeHtml(d.domain)}</option>`).join('')
+        : `<option value="">No domains</option>`;
+    } catch (error) {
+      console.error('Error loading domains:', error);
+      select.innerHTML = `<option value="">Failed to load domains</option>`;
+    }
+  }
+
+  async runSafeTerminalAction() {
+    const actionSelect = document.getElementById('safe-terminal-action');
+    const domainSelect = document.getElementById('safe-terminal-domain');
+    const output = document.getElementById('safe-terminal-output');
+    const action = actionSelect?.value;
+    if (!action) return this.showToast('Select an action', 'error');
+    const opt = actionSelect.options[actionSelect.selectedIndex];
+    const requiresDomain = opt?.dataset.requiresDomain === 'true';
+    if (requiresDomain && !domainSelect?.value) return this.showToast('Select a domain', 'error');
+
+    output.textContent = 'Running…';
+    try {
+      const res = await fetch('/api/terminal/safe-command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, domainId: requiresDomain ? Number(domainSelect.value) : undefined })
+      });
+      const data = await res.json();
+      output.textContent = res.ok ? (data.data.output || '(no output)') : (data.message || 'Action failed');
+    } catch (error) {
+      console.error('Error running safe terminal action:', error);
+      output.textContent = '[connection error]';
+    }
+  }
+
   loadTerminalData() {
+    if (this.currentUser?.role !== 'admin') {
+      this._populateSafeActionSelect('safe-terminal-action', '/api/terminal/safe-actions');
+      this._populateDomainSelect('safe-terminal-domain');
+      return;
+    }
+
     this._terminalCwd = null;
     this._terminalHistory = [];
     this._terminalHistoryIndex = -1;
@@ -5834,6 +5949,9 @@ class ServerPanelApp {
   // =====================================================
 
   getCronPageContent() {
+    if (this.currentUser?.role !== 'admin') {
+      return this._getSafeCronPageContent();
+    }
     return `
       <div style="margin-top:1.5rem;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
@@ -5899,7 +6017,210 @@ class ServerPanelApp {
     `;
   }
 
+  // Non-admin path (cron:safe): schedule one of the same fixed safe
+  // actions the terminal page exposes — the action <select>'s value is
+  // the only thing that ever reaches POST /api/cron/user-jobs as
+  // `action`; there is no command/textarea field for a "user" to fill in
+  // free text, mirroring _getSafeTerminalPageContent above.
+  _getSafeCronPageContent() {
+    return `
+      <div style="margin-top:1.5rem;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+          <div>
+            <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-clock" style="color:var(--primary);margin-right:0.5rem;"></i>Cron Jobs</h2>
+            <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Schedule one of a fixed set of read-only actions. Free-text commands are admin-only.</p>
+          </div>
+          <button class="btn btn-primary" onclick="app.showCreateSafeCronModal()"><i class="fas fa-plus"></i> New Job</button>
+        </div>
+        <div class="card" style="padding:0;overflow:hidden;">
+          <div style="overflow-x:auto;">
+            <table class="svc-table">
+              <thead>
+                <tr><th>Name</th><th>Schedule</th><th>Action</th><th>Status</th><th>Last Run</th><th>Actions</th></tr>
+              </thead>
+              <tbody id="safe-cron-tbody">
+                <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted);"><i class="fas fa-spinner fa-spin" style="margin-right:0.5rem;"></i>Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Create Safe Cron Job Modal -->
+      <div id="safe-cron-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:480px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">New Cron Job</h3>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Name</label>
+            <input id="safe-cron-name" type="text" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;">
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Schedule (cron expression)</label>
+            <input id="safe-cron-schedule" type="text" placeholder="*/5 * * * *" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;font-family:monospace;">
+            <small style="color:var(--text-muted);">minute hour day month weekday — e.g. <code>0 2 * * *</code> = daily at 2am</small>
+          </div>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Action</label>
+            <select id="safe-cron-action" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);" onchange="app._onSafeActionChange('safe-cron-action', 'safe-cron-domain-group')">
+              <option value="">Loading…</option>
+            </select>
+          </div>
+          <div class="form-group" id="safe-cron-domain-group" style="margin-bottom:1rem;display:none;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Domain</label>
+            <select id="safe-cron-domain" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);"></select>
+          </div>
+          <div class="form-group" style="margin-bottom:1.5rem;display:flex;align-items:center;gap:0.6rem;">
+            <input id="safe-cron-active" type="checkbox" checked style="width:auto;">
+            <label style="color:var(--text-secondary);margin:0;">Active</label>
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+            <button class="btn" onclick="app.hideModal('safe-cron-modal')">Cancel</button>
+            <button class="btn btn-primary" onclick="app.submitSafeCronJob()"><i class="fas fa-check"></i> Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Job output viewer -->
+      <div id="cron-output-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:600px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1rem;">Last Run Output</h3>
+          <pre id="cron-output-content" style="background:#0d1117;color:#c9d1d9;padding:1rem;border-radius:var(--border-radius-sm);max-height:400px;overflow:auto;font-size:0.78rem;white-space:pre-wrap;word-break:break-word;"></pre>
+          <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
+            <button class="btn" onclick="app.hideModal('cron-output-modal')">Close</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async loadSafeCronData() {
+    try {
+      const res = await fetch('/api/cron/user-jobs');
+      const data = await res.json();
+      const tbody = document.getElementById('safe-cron-tbody');
+      if (!data.success || !data.data.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted);">No cron jobs yet.</td></tr>`;
+        return;
+      }
+      this._safeCronJobs = data.data;
+      tbody.innerHTML = data.data.map(job => {
+        const statusBadge = job.is_active ? `<span class="badge badge-success">Active</span>` : `<span class="badge badge-muted">Paused</span>`;
+        const lastRun = job.last_run_at
+          ? `<span style="color:${job.last_exit_code === 0 ? 'var(--success)' : 'var(--danger)'};">${new Date(job.last_run_at).toLocaleString()}</span>`
+          : '<span style="color:var(--text-muted);">Never</span>';
+        return `
+          <tr>
+            <td style="font-weight:500;color:var(--text-primary);">${this.escapeHtml(job.name)}</td>
+            <td class="mono" style="font-size:0.78rem;">${this.escapeHtml(job.schedule)}</td>
+            <td class="mono" style="font-size:0.78rem;color:var(--text-secondary);">${this.escapeHtml(job.command)}</td>
+            <td>${statusBadge}</td>
+            <td style="font-size:0.75rem;">${lastRun}</td>
+            <td>
+              <div style="display:flex;gap:0.25rem;">
+                <button class="btn btn-icon btn-sm" title="Run Now" onclick="app.runSafeCronJobNow(${job.id})"><i class="fas fa-play"></i></button>
+                <button class="btn btn-icon btn-sm" title="View Output" onclick="app.showSafeCronOutput(${job.id})"><i class="fas fa-align-left"></i></button>
+                <button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteSafeCronJob(${job.id}, '${this.escapeHtml(job.name)}')"><i class="fas fa-trash"></i></button>
+              </div>
+            </td>
+          </tr>`;
+      }).join('');
+    } catch (error) {
+      console.error('Error loading cron jobs:', error);
+      this.showToast('Failed to load cron jobs', 'error');
+    }
+  }
+
+  showCreateSafeCronModal() {
+    document.getElementById('safe-cron-name').value = '';
+    document.getElementById('safe-cron-schedule').value = '';
+    document.getElementById('safe-cron-active').checked = true;
+    document.getElementById('safe-cron-domain-group').style.display = 'none';
+    this._populateSafeActionSelect('safe-cron-action', '/api/cron/safe-actions');
+    this._populateDomainSelect('safe-cron-domain');
+    this.showModal('safe-cron-modal');
+  }
+
+  async submitSafeCronJob() {
+    const actionSelect = document.getElementById('safe-cron-action');
+    const domainSelect = document.getElementById('safe-cron-domain');
+    const action = actionSelect?.value;
+    const opt = actionSelect?.options[actionSelect.selectedIndex];
+    const requiresDomain = opt?.dataset.requiresDomain === 'true';
+
+    const payload = {
+      name: document.getElementById('safe-cron-name').value.trim(),
+      schedule: document.getElementById('safe-cron-schedule').value.trim(),
+      action,
+      is_active: document.getElementById('safe-cron-active').checked
+    };
+    if (requiresDomain) payload.domainId = Number(domainSelect.value) || undefined;
+
+    if (!payload.name || !payload.schedule || !action) {
+      return this.showToast('Name, schedule, and action are required', 'error');
+    }
+    if (requiresDomain && !payload.domainId) {
+      return this.showToast('Select a domain', 'error');
+    }
+
+    try {
+      const res = await fetch('/api/cron/user-jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('safe-cron-modal');
+        this.showToast(data.message || 'Cron job saved', 'success');
+        this.loadSafeCronData();
+      } else {
+        this.showToast(data.message || data.errors?.[0]?.msg || 'Failed to save cron job', 'error');
+      }
+    } catch (error) {
+      console.error('Error saving cron job:', error);
+      this.showToast('Failed to save cron job', 'error');
+    }
+  }
+
+  async runSafeCronJobNow(jobId) {
+    try {
+      const res = await fetch(`/api/cron/user-jobs/${jobId}/run`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        this.showToast('Job started — refreshing in a moment…', 'info');
+        setTimeout(() => this.loadSafeCronData(), 1500);
+      } else {
+        this.showToast(data.message || 'Failed to run job', 'error');
+      }
+    } catch (error) {
+      console.error('Error running cron job:', error);
+      this.showToast('Failed to run job', 'error');
+    }
+  }
+
+  showSafeCronOutput(jobId) {
+    const job = (this._safeCronJobs || []).find(j => j.id === jobId);
+    if (!job) return;
+    document.getElementById('cron-output-content').textContent = job.last_output || '(no output yet — run the job first)';
+    this.showModal('cron-output-modal');
+  }
+
+  async deleteSafeCronJob(jobId, name) {
+    if (!confirm(`Delete cron job "${name}"?`)) return;
+    try {
+      const res = await fetch(`/api/cron/user-jobs/${jobId}`, { method: 'DELETE' });
+      if (res.ok) { this.showToast('Cron job deleted', 'success'); this.loadSafeCronData(); }
+      else this.showToast('Failed to delete cron job', 'error');
+    } catch (error) {
+      console.error('Error deleting cron job:', error);
+      this.showToast('Failed to delete cron job', 'error');
+    }
+  }
+
   async loadCronData() {
+    if (this.currentUser?.role !== 'admin') {
+      return this.loadSafeCronData();
+    }
     try {
       const res = await fetch('/api/cron');
       const data = await res.json();

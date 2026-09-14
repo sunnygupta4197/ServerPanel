@@ -86,14 +86,16 @@
           <li><a href="#" class="nav-link" data-page="database"><i class="fas fa-database"></i><span>Databases</span></a></li>
           <li><a href="#" class="nav-link" data-page="users"><i class="fas fa-users"></i><span>Users</span></a></li>
           <li><a href="#" class="nav-link" data-page="settings"><i class="fas fa-sliders-h"></i><span>Settings</span></a></li>
-        </ul>
-      </div>
-      <!-- Admin-only: hidden for non-admin roles by app.js after login -->
-      <div class="nav-group" id="nav-group-admin">
-        <div class="nav-group-label">Admin</div>
-        <ul class="nav-menu">
+          <!-- Terminal: admin gets full free-text shell access; user/viewer
+               get a fixed safe-action list (terminal:safe permission) —
+               same nav link either way, page content branches by role. -->
           <li><a href="#" class="nav-link" data-page="terminal"><i class="fas fa-terminal"></i><span>Terminal</span></a></li>
-          <li><a href="#" class="nav-link" data-page="cron"><i class="fas fa-clock"></i><span>Cron Jobs</span></a></li>
+          <!-- Cron: admin gets full free-text shell jobs; user gets a fixed
+               safe-action list (cron:safe permission). Hidden for viewer
+               entirely (no cron:safe grant — see src/config/permissions.js,
+               scheduling something to run later doesn't fit a read-only
+               role) by app.js after login. -->
+          <li id="nav-cron-jobs"><a href="#" class="nav-link" data-page="cron"><i class="fas fa-clock"></i><span>Cron Jobs</span></a></li>
         </ul>
       </div>
     </nav>

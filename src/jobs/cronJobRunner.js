@@ -13,6 +13,7 @@ const { spawn } = require('child_process');
 const database = require('../config/database');
 const logger = require('../config/logger');
 const config = require('../config/config');
+const safeCommandService = require('../services/safeCommandService');
 
 const MAX_OUTPUT_CHARS = 50 * 1024; // stored in the DB, so a tighter cap than terminal.js's live-response one
 const COMMAND_TIMEOUT_MS = 5 * 60 * 1000; // scheduled jobs get more time than an interactive terminal command
@@ -49,12 +50,38 @@ function runShellCommand(command) {
   });
 }
 
+// A "safe_action" job's `command` column stores an action KEY (e.g.
+// "disk_usage"), never free text — reused from cron_jobs.command so a
+// second column wasn't needed, but the two are never interchangeable at
+// runtime: command_type is what decides whether this text is treated as
+// a shell command or looked up in safeCommandService's fixed action
+// table, and command_type is only ever set to 'shell' by the admin-only
+// route in cron.js (see migrations/scheduled_cron_jobs_safe_actions.js).
+async function runSafeAction(job) {
+  let documentRoot;
+  if (safeCommandService.requiresDomain(job.command)) {
+    if (!job.domain_id) return { output: `Action "${job.command}" requires a domain, but this job has none configured`, exitCode: -1 };
+    const domain = await database('domains').where('id', job.domain_id).first();
+    if (!domain) return { output: 'The domain this job was scoped to no longer exists', exitCode: -1 };
+    documentRoot = domain.document_root;
+  }
+
+  try {
+    const output = await safeCommandService.runAction(job.command, documentRoot);
+    return { output: String(output).slice(0, MAX_OUTPUT_CHARS), exitCode: 0 };
+  } catch (error) {
+    return { output: error.message, exitCode: -1 };
+  }
+}
+
 async function runJob(jobId) {
   const job = await database('cron_jobs').where('id', jobId).first();
   if (!job || !job.is_active) return;
 
-  logger.info(`Running cron job ${job.id} (${job.name})`);
-  const result = await runShellCommand(job.command);
+  logger.info(`Running cron job ${job.id} (${job.name}) [${job.command_type}]`);
+  const result = job.command_type === 'safe_action'
+    ? await runSafeAction(job)
+    : await runShellCommand(job.command);
 
   await database('cron_jobs').where('id', job.id).update({
     last_run_at: new Date(),
@@ -64,7 +91,7 @@ async function runJob(jobId) {
   });
 
   logger.audit('cron_job_run', { id: job.created_by }, 'cron', {
-    jobId: job.id, name: job.name, exitCode: result.exitCode
+    jobId: job.id, name: job.name, commandType: job.command_type, exitCode: result.exitCode
   });
 
   if (result.exitCode !== 0) {

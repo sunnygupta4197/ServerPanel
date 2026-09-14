@@ -24,7 +24,8 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'backups:read', 'backups:write',
     'apps:read', 'apps:install', 'apps:uninstall', 'apps:update', 'apps:configure',
     'ftp:read', 'ftp:write',
-    'php:read', 'php:write'
+    'php:read', 'php:write',
+    'terminal:safe', 'cron:safe'
   ],
   // A "user" here is a hosting customer managing their own account, not an
   // operator of the panel host itself — no system:write, services:*, or
@@ -40,7 +41,8 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'backups:read', 'backups:write',
     'apps:read', 'apps:install', 'apps:uninstall',
     'ftp:read', 'ftp:write',
-    'php:read', 'php:write'
+    'php:read', 'php:write',
+    'terminal:safe', 'cron:safe'
   ],
   viewer: [
     'files:read',
@@ -52,7 +54,11 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'backups:read',
     'apps:read',
     'ftp:read',
-    'php:read'
+    'php:read',
+    // Read-only diagnostics fit viewer's read-only nature; cron:safe
+    // (scheduling something to run later) does not — that stays a
+    // "user"/admin-only action.
+    'terminal:safe'
   ]
 };
 

@@ -287,7 +287,6 @@ exports.seed = async function(knex) {
   ]);
 
   // Create default API key for admin
-  const crypto = require('crypto');
   const apiKey = crypto.randomBytes(32).toString('hex');
   
   await knex('api_keys').insert({
