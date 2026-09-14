@@ -17,6 +17,18 @@ async function pruneOldBackups(schedule) {
   }
 }
 
+// Tracks schedule ids with a backup currently in progress — next_run
+// only advances after runScheduledBackup() finishes (see the update at
+// the bottom of that function), so a real backup that takes longer than
+// a minute would otherwise still match `next_run <= now` on every tick
+// while it's running, and the once-a-minute cron tick would launch
+// another concurrent run of the exact same schedule. Wasteful (doubled
+// I/O/CPU, duplicate 'running' rows in the backups table confusing the
+// UI) rather than corrupting anything — each run's staging directory is
+// independently randomly named — but a real, easy-to-hit bug on any
+// backup big enough to take over a minute, which is most real ones.
+const runningScheduleIds = new Set();
+
 async function runScheduledBackup(schedule) {
   const backupName = `${schedule.type}-scheduled-${new Date().toISOString().replace(/[:.]/g, '-')}`;
 
@@ -87,7 +99,13 @@ function start() {
         .where('next_run', '<=', new Date());
 
       for (const schedule of due) {
-        await runScheduledBackup(schedule);
+        if (runningScheduleIds.has(schedule.id)) continue; // still running from a previous tick — next_run hasn't advanced yet
+        runningScheduleIds.add(schedule.id);
+        try {
+          await runScheduledBackup(schedule);
+        } finally {
+          runningScheduleIds.delete(schedule.id);
+        }
       }
     } catch (error) {
       logger.error('Backup scheduler tick failed:', error);

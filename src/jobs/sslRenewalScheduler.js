@@ -87,6 +87,13 @@ async function runTick() {
 // backupScheduler.js's identical guard for the fuller reasoning.
 let started = false;
 
+// Same overlap risk backupScheduler.js/quotaEnforcer.js guard against —
+// a tick renewing several certificates via real ACME requests could in
+// principle still be running when the next daily tick fires (a slow or
+// rate-limited ACME exchange, many certs due at once). Cheap to guard
+// even though a same-day overlap is unlikely in practice.
+let tickRunning = false;
+
 function start() {
   if (started) return;
   started = true;
@@ -96,10 +103,14 @@ function start() {
   // one domain per certificate with no shared rate-limit pressure across
   // instances, so a daily tick is a reasonable, conservative default.
   cron.schedule('0 3 * * *', async () => {
+    if (tickRunning) return;
+    tickRunning = true;
     try {
       await runTick();
     } catch (error) {
       logger.error('SSL renewal scheduler tick failed:', error);
+    } finally {
+      tickRunning = false;
     }
   });
 

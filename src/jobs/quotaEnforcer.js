@@ -94,6 +94,15 @@ async function checkEmailQuotas() {
 // backupScheduler.js's identical guard for the fuller reasoning.
 let started = false;
 
+// A real recursive directory walk across every FTP/email account can
+// take longer than 15 minutes on a host with enough accounts/data — with
+// no guard, the next tick would start a second, fully overlapping sweep
+// on top of the first (wasted I/O, and two ticks racing to write the
+// same rows' used_mb/over_quota). Same overlap risk backupScheduler.js
+// has for the same underlying reason (a tick doing real, possibly-slow
+// I/O on a fixed-interval schedule).
+let tickRunning = false;
+
 function start() {
   if (started) return;
   started = true;
@@ -102,11 +111,15 @@ function start() {
   // doesn't stay wrongly-active for long, infrequent enough that walking
   // every account's directory tree isn't a constant background cost.
   cron.schedule('*/15 * * * *', async () => {
+    if (tickRunning) return;
+    tickRunning = true;
     try {
       await checkFtpQuotas();
       await checkEmailQuotas();
     } catch (error) {
       logger.error('Quota enforcer tick failed:', error);
+    } finally {
+      tickRunning = false;
     }
   });
 

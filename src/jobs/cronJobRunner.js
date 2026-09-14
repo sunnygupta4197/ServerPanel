@@ -20,6 +20,18 @@ const COMMAND_TIMEOUT_MS = 5 * 60 * 1000; // scheduled jobs get more time than a
 
 const registeredTasks = new Map();
 
+// A shell job can run for up to COMMAND_TIMEOUT_MS (5 minutes) but cron
+// expressions can fire every minute — with no guard, a slow job would
+// get a second, third, fourth... overlapping invocation stacked on top
+// of the first, each spawning its own real process, all racing to write
+// the same job's last_output/last_exit_code (whichever finishes last
+// wins, not necessarily the most recent run). Also guards against a
+// manual "Run Now" landing on top of an already-in-progress scheduled
+// run of the same job. Same overlap-guard pattern as backupScheduler.js/
+// quotaEnforcer.js/sslRenewalScheduler.js, scoped per-job here since each
+// job has its own independent schedule rather than one shared tick.
+const runningJobIds = new Set();
+
 function runShellCommand(command) {
   return new Promise((resolve) => {
     const isWindows = config.SYSTEM.IS_WINDOWS;
@@ -75,27 +87,37 @@ async function runSafeAction(job) {
 }
 
 async function runJob(jobId) {
-  const job = await database('cron_jobs').where('id', jobId).first();
-  if (!job || !job.is_active) return;
+  if (runningJobIds.has(jobId)) {
+    logger.warn(`Cron job ${jobId} is still running from a previous invocation — skipping this scheduled/manual trigger`);
+    return;
+  }
+  runningJobIds.add(jobId);
 
-  logger.info(`Running cron job ${job.id} (${job.name}) [${job.command_type}]`);
-  const result = job.command_type === 'safe_action'
-    ? await runSafeAction(job)
-    : await runShellCommand(job.command);
+  try {
+    const job = await database('cron_jobs').where('id', jobId).first();
+    if (!job || !job.is_active) return;
 
-  await database('cron_jobs').where('id', job.id).update({
-    last_run_at: new Date(),
-    last_exit_code: result.exitCode,
-    last_output: result.output.slice(0, MAX_OUTPUT_CHARS) + (result.truncated ? '\n[output truncated]' : ''),
-    updated_at: new Date()
-  });
+    logger.info(`Running cron job ${job.id} (${job.name}) [${job.command_type}]`);
+    const result = job.command_type === 'safe_action'
+      ? await runSafeAction(job)
+      : await runShellCommand(job.command);
 
-  logger.audit('cron_job_run', { id: job.created_by }, 'cron', {
-    jobId: job.id, name: job.name, commandType: job.command_type, exitCode: result.exitCode
-  });
+    await database('cron_jobs').where('id', job.id).update({
+      last_run_at: new Date(),
+      last_exit_code: result.exitCode,
+      last_output: result.output.slice(0, MAX_OUTPUT_CHARS) + (result.truncated ? '\n[output truncated]' : ''),
+      updated_at: new Date()
+    });
 
-  if (result.exitCode !== 0) {
-    logger.warn(`Cron job ${job.id} (${job.name}) exited with code ${result.exitCode}`);
+    logger.audit('cron_job_run', { id: job.created_by }, 'cron', {
+      jobId: job.id, name: job.name, commandType: job.command_type, exitCode: result.exitCode
+    });
+
+    if (result.exitCode !== 0) {
+      logger.warn(`Cron job ${job.id} (${job.name}) exited with code ${result.exitCode}`);
+    }
+  } finally {
+    runningJobIds.delete(jobId);
   }
 }
 
