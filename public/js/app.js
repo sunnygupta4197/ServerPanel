@@ -477,7 +477,8 @@ class ServerPanelApp {
       ftp: 'FTP Accounts',
       terminal: 'Terminal',
       cron: 'Cron Jobs',
-      sitePublisher: 'Site Publisher'
+      sitePublisher: 'Site Publisher',
+      customerDatabases: 'App Databases'
     };
     return titles[page] || 'Unknown Page';
   }
@@ -526,6 +527,8 @@ class ServerPanelApp {
         return this.getCronPageContent();
       case 'sitePublisher':
         return this.getSitePublisherPageContent();
+      case 'customerDatabases':
+        return this.getCustomerDatabasesPageContent();
       default:
         return `
           <div class="card" style="margin-top: 2rem;">
@@ -591,6 +594,9 @@ class ServerPanelApp {
         break;
       case 'sitePublisher':
         this.loadSitePublisherData();
+        break;
+      case 'customerDatabases':
+        this.loadCustomerDatabasesData();
         break;
     }
   }
@@ -6731,6 +6737,150 @@ class ServerPanelApp {
     } catch (error) {
       console.error('Error publishing site:', error);
       this.showToast('Failed to publish site', 'error');
+    }
+  }
+
+  // =====================================================
+  // APP DATABASES PAGE (real per-customer database provisioning —
+  // distinct from Management > Databases, the admin-only console over
+  // this panel's own operational DB)
+  // =====================================================
+
+  getCustomerDatabasesPageContent() {
+    const canWrite = this.currentUser?.role !== 'viewer';
+    return `
+      <div style="margin-top:1.5rem;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
+          <div>
+            <h2 style="color:var(--text-primary);margin:0;"><i class="fas fa-server" style="color:var(--primary);margin-right:0.5rem;"></i>App Databases</h2>
+            <p style="color:var(--text-secondary);margin:0.25rem 0 0;font-size:0.8125rem;">Real, separate databases for your own applications (e.g. WordPress) — not this panel's own data.</p>
+          </div>
+          ${canWrite ? `<button class="btn btn-primary" onclick="app.showCreateCustomerDatabaseModal()"><i class="fas fa-plus"></i> New Database</button>` : ''}
+        </div>
+        <div class="card" style="padding:0;overflow:hidden;">
+          <div style="overflow-x:auto;">
+            <table class="svc-table">
+              <thead>
+                <tr><th>Name</th><th>Engine</th><th>User</th><th>Host</th><th>Status</th><th>Actions</th></tr>
+              </thead>
+              <tbody id="customerdb-tbody">
+                <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted);"><i class="fas fa-spinner fa-spin" style="margin-right:0.5rem;"></i>Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Create Modal -->
+      <div id="customerdb-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:440px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:1.25rem;">New Database</h3>
+          <div class="form-group" style="margin-bottom:1rem;">
+            <label style="color:var(--text-secondary);display:block;margin-bottom:0.4rem;">Database Name</label>
+            <input id="customerdb-name" type="text" placeholder="wp_mysite" class="form-control" style="width:100%;padding:0.75rem;background:var(--dark-light);border:1px solid var(--border);border-radius:var(--border-radius-sm);color:var(--text-primary);box-sizing:border-box;font-family:monospace;">
+            <small style="color:var(--text-muted);">Letters, numbers, underscores — must start with a letter.</small>
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:flex-end;">
+            <button class="btn" onclick="app.hideModal('customerdb-modal')">Cancel</button>
+            <button class="btn btn-primary" onclick="app.submitCustomerDatabase()"><i class="fas fa-check"></i> Create</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- One-time credentials reveal — for mysql2/pg only; sqlite has no
+           server-side user/password at all, so this modal is only ever
+           shown when the create response actually includes a password. -->
+      <div id="customerdb-credentials-modal" class="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;">
+        <div class="card" style="width:480px;max-width:95vw;">
+          <h3 style="color:var(--text-primary);margin-bottom:0.5rem;"><i class="fas fa-key" style="color:var(--warning);margin-right:0.5rem;"></i>Save These Credentials</h3>
+          <p style="color:var(--danger);font-size:0.8125rem;margin:0 0 1rem;">This password is shown once and cannot be retrieved again.</p>
+          <div id="customerdb-credentials-content" style="background:#0d1117;color:#c9d1d9;font-family:monospace;font-size:0.8rem;padding:1rem;border-radius:var(--border-radius-sm);white-space:pre-wrap;word-break:break-all;"></div>
+          <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
+            <button class="btn btn-primary" onclick="app.hideModal('customerdb-credentials-modal')">I've saved this</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async loadCustomerDatabasesData() {
+    try {
+      const res = await fetch('/api/customer-databases');
+      const data = await res.json();
+      const tbody = document.getElementById('customerdb-tbody');
+      if (!data.success || !data.data.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-muted);">No databases yet.</td></tr>`;
+        return;
+      }
+      this._customerDatabases = data.data;
+      const canWrite = this.currentUser?.role !== 'viewer';
+      tbody.innerHTML = data.data.map(db => {
+        const statusBadge = db.status === 'active' ? `<span class="badge badge-success">Active</span>` : `<span class="badge badge-danger">Failed</span>`;
+        return `
+          <tr>
+            <td style="font-weight:500;color:var(--text-primary);font-family:monospace;">${this.escapeHtml(db.db_name)}</td>
+            <td>${this.escapeHtml(db.engine)}</td>
+            <td class="mono" style="font-size:0.78rem;">${this.escapeHtml(db.db_user || '—')}</td>
+            <td class="mono" style="font-size:0.78rem;">${this.escapeHtml(db.host || '(local file)')}</td>
+            <td>${statusBadge}</td>
+            <td>
+              ${canWrite ? `<button class="btn btn-icon btn-sm" title="Delete" style="color:var(--danger);" onclick="app.deleteCustomerDatabase(${db.id}, '${this.escapeHtml(db.db_name)}')"><i class="fas fa-trash"></i></button>` : ''}
+            </td>
+          </tr>`;
+      }).join('');
+    } catch (error) {
+      console.error('Error loading app databases:', error);
+      this.showToast('Failed to load databases', 'error');
+    }
+  }
+
+  showCreateCustomerDatabaseModal() {
+    document.getElementById('customerdb-name').value = '';
+    this.showModal('customerdb-modal');
+  }
+
+  async submitCustomerDatabase() {
+    const dbName = document.getElementById('customerdb-name').value.trim();
+    if (!dbName) return this.showToast('Database name is required', 'error');
+
+    try {
+      const res = await fetch('/api/customer-databases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dbName })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this.hideModal('customerdb-modal');
+        this.loadCustomerDatabasesData();
+        if (data.data.password) {
+          document.getElementById('customerdb-credentials-content').textContent =
+            `Host: ${data.data.host}\nPort: ${data.data.port}\nDatabase: ${data.data.db_name}\nUser: ${data.data.db_user}\nPassword: ${data.data.password}`;
+          this.showModal('customerdb-credentials-modal');
+        } else {
+          this.showToast(data.message || 'Database created', 'success');
+        }
+      } else {
+        this.showToast(data.message || data.errors?.[0]?.msg || 'Failed to create database', 'error');
+      }
+    } catch (error) {
+      console.error('Error creating app database:', error);
+      this.showToast('Failed to create database', 'error');
+    }
+  }
+
+  async deleteCustomerDatabase(id, name) {
+    if (!confirm(`Delete database "${name}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/customer-databases/${id}`, { method: 'DELETE' });
+      if (res.ok) { this.showToast('Database deleted', 'success'); this.loadCustomerDatabasesData(); }
+      else {
+        const data = await res.json().catch(() => ({}));
+        this.showToast(data.message || 'Failed to delete database', 'error');
+      }
+    } catch (error) {
+      console.error('Error deleting app database:', error);
+      this.showToast('Failed to delete database', 'error');
     }
   }
 

@@ -26,12 +26,17 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'ftp:read', 'ftp:write',
     'php:read', 'php:write',
     'terminal:safe', 'cron:safe',
-    'sites:read', 'sites:write'
+    'sites:read', 'sites:write',
+    'customerdb:read', 'customerdb:write'
   ],
   // A "user" here is a hosting customer managing their own account, not an
   // operator of the panel host itself — no system:write, services:*, or
   // database:* (that route is an internal admin console over the panel's
-  // own operational DB, not a customer-facing feature).
+  // own operational DB, not a customer-facing feature). customerdb:* is
+  // the actual customer-facing equivalent of cPanel's "MySQL Databases" —
+  // a separate feature/permission pair specifically so it's reachable
+  // here without ever touching the internal console. See
+  // migrations/customer_databases.js.
   user: [
     'files:read', 'files:write',
     'monitoring:read',
@@ -44,7 +49,8 @@ const DEFAULT_ROLE_PERMISSIONS = {
     'ftp:read', 'ftp:write',
     'php:read', 'php:write',
     'terminal:safe', 'cron:safe',
-    'sites:read', 'sites:write'
+    'sites:read', 'sites:write',
+    'customerdb:read', 'customerdb:write'
   ],
   viewer: [
     'files:read',
@@ -65,7 +71,10 @@ const DEFAULT_ROLE_PERMISSIONS = {
     // never touches the filesystem, so it's as read-only as it looks;
     // sites:write (actually publishing to a document root) is withheld,
     // same reasoning as cron:safe above.
-    'sites:read'
+    'sites:read',
+    // customerdb:read only — viewer can see what databases exist, not
+    // create/drop real ones.
+    'customerdb:read'
   ]
 };
 
